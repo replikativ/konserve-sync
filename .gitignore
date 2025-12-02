@@ -1,0 +1,38 @@
+# Clojure
+/target/
+/classes/
+/checkouts/
+pom.xml
+pom.xml.asc
+*.jar
+*.class
+/.lein-*
+/.nrepl-port
+/.cpcache/
+/.clj-kondo/.cache/
+
+# Node/CLJS
+/node_modules/
+/out/
+/.shadow-cljs/
+package-lock.json
+
+# IDE
+/.idea/
+/*.iml
+/.vscode/
+/.calva/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*~
+\#*\#
+.\#*
+*.swp
+*.swo
+
+# REPL
+.repl-history

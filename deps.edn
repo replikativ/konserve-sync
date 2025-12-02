@@ -1,0 +1,24 @@
+{:paths ["src"]
+
+ :deps
+ {org.clojure/clojure {:mvn/version "1.11.1"}
+  io.replikativ/konserve {:git/url "https://github.com/replkikative/konserve" 
+                          :git/sha "4d44dfe2e1955933e564c9f4c815b5bb3c33d6dd"}
+  io.replikativ/hasch {:mvn/version "0.3.94"}
+  io.replikativ/superv.async {:mvn/version "0.3.48"}}
+
+ :aliases
+ {:dev
+  {:extra-paths ["test"]
+   :extra-deps {io.replikativ/kabel {:git/url "https://github.com/replikativ/kabel" 
+                                     :git/sha "69f47ce3d97b6e3d29c8c458ff1d665fce6a860f"}}}
+
+  :test
+  {:extra-paths ["test"]
+   :extra-deps {io.replikativ/kabel {:git/url "https://github.com/replikativ/kabel" 
+                                     :git/sha "69f47ce3d97b6e3d29c8c458ff1d665fce6a860f"}
+                lambdaisland/kaocha {:mvn/version "1.91.1392"}}}
+
+  :cljs-test
+  {:extra-paths ["test"]
+   :extra-deps {thheller/shadow-cljs {:mvn/version "2.26.0"}}}}}
