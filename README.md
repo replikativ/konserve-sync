@@ -515,4 +515,4 @@ clj -M:test -m kaocha.runner --watch
 
 Copyright 2025 Christian Weilbach
 
-Distributed under the Eclipse Public License 1.0.
+Distributed under the Apache License 2.0.
