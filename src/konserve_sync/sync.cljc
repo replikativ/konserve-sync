@@ -9,13 +9,16 @@
 
    All async operations use superv.async for proper error handling
    and supervision. Pass in a supervisor when creating the context."
-  (:require [clojure.core.async :refer [chan put! close! alts! timeout]]
-            [superv.async :refer [go-try go-loop-try <? >? put?]]
+  (:require #?(:clj [clojure.core.async :refer [chan put! close! alts! timeout go go-loop]]
+               :cljs [clojure.core.async :refer [chan put! close! alts! timeout] :refer-macros [go go-loop]])
+            #?(:clj [superv.async :refer [go-try go-loop-try <? >? put?]]
+               :cljs [superv.async :refer [<? >? put?] :refer-macros [go-try go-loop-try]])
             [konserve.core :as k]
             [konserve-sync.protocol :as proto]
             [konserve-sync.emitter :as emitter]
             [konserve-sync.receiver :as receiver]
-            [konserve-sync.transport.protocol :as tp]))
+            [konserve-sync.transport.protocol :as tp]
+            [konserve-sync.log :as log]))
 
 ;; =============================================================================
 ;; Error Types
@@ -258,41 +261,63 @@
    - {:ok true} when subscription is established
    - {:error ex} on failure"
   [ctx transport msg]
+  (log/debug! {:id ::serve-subscription-start
+               :msg "Serving subscription request"
+               :data {:msg-type (:type msg)}})
   (let [S (:S ctx)]
     (go-try S
       (let [{:keys [store-id local-key-timestamps id]} msg]
+        (log/debug! {:id ::serve-subscription
+                     :msg "Processing subscription"
+                     :data {:store-id store-id :msg-id id
+                            :registered-stores (keys (get @(:state ctx) :stores))}})
         (if-not (get-in @(:state ctx) [:stores store-id])
           ;; Store not found
           (do
+            (log/error! {:id ::store-not-found
+                         :msg "Store not registered"
+                         :data {:store-id store-id}})
             (<? S (tp/send! transport (proto/make-subscribe-error-msg store-id id "Store not found")))
             {:error (sync-error :subscribe store-id
                                 (ex-info "Store not found" {:store-id store-id}))})
 
           ;; Store exists - start subscription
           (do
+            (log/debug! {:id ::sending-ack :msg "Sending subscribe ack"})
             ;; Send ack
             (<? S (tp/send! transport (proto/make-subscribe-ack-msg store-id id)))
 
             ;; Add to subscribers
             (swap! (:state ctx) update-in [:subscriptions store-id :subscribers]
                    (fnil conj #{}) transport)
+            (log/debug! {:id ::added-subscriber :msg "Added to subscribers"})
 
             ;; Set up handler for batch acks
             (tp/on-message! transport
                             (fn [ack-msg]
                               (when (and (= :sync/batch-ack (:type ack-msg))
                                          (= store-id (:store-id ack-msg)))
+                                (log/trace! {:id ::batch-ack-received
+                                             :msg "Batch ack received"
+                                             :data {:batch-idx (:batch-idx ack-msg)}})
                                 (swap! (:state ctx) assoc-in
                                        [:subscriptions store-id :acked transport]
                                        (:batch-idx ack-msg)))))
 
             ;; Send initial keys (comparing timestamps)
+            (log/debug! {:id ::sending-initial-keys :msg "Sending initial keys"})
             (let [result (<? S (send-initial-keys! ctx store-id transport (or local-key-timestamps {})))]
+              (log/debug! {:id ::initial-keys-result
+                           :msg "Initial keys sent"
+                           :data {:result result}})
               (if (:error result)
                 result
                 (do
                   ;; Send complete message
                   (<? S (tp/send! transport (proto/make-complete-msg store-id)))
+                  (log/info! {:id ::subscription-complete
+                              :msg "Subscription complete"
+                              :data {:store-id store-id}})
                   {:ok true})))))))))
 
 (defn remove-subscriber!
@@ -328,11 +353,17 @@
    - {:error ex} on failure"
   [ctx transport store-id local-store {:keys [on-error on-complete] :as opts}]
   {:pre [(some? on-error)]}
+  (log/debug! {:id ::subscribe-start
+               :msg "Starting subscription"
+               :data {:store-id store-id}})
   (let [S (:S ctx)]
     (go-try S
       (let [;; Get local keys with timestamps for differential sync
             ;; k/keys returns maps like {:key :foo, :type :edn, :last-write #inst "..."}
             local-keys-metas (<? S (k/keys local-store))
+            _ (log/trace! {:id ::local-keys
+                           :msg "Got local keys"
+                           :data {:count (count local-keys-metas)}})
             local-key-timestamps (into {}
                                        (map (fn [{:keys [key last-write]}]
                                               [key last-write]))
@@ -345,47 +376,70 @@
             complete-ch (chan 1)]
 
         ;; Set up message handler for this subscription
+        (log/debug! {:id ::creating-receiver :msg "Creating receiver"})
         (let [receiver-state (receiver/create-receiver! S store-id local-store transport opts)
 
               ;; Additional handler for control messages
               control-handler
               (tp/on-message! transport
                               (fn [msg]
+                                (log/trace! {:id ::control-handler
+                                             :msg "Control message received"
+                                             :data {:msg-type (:type msg) :store-id (:store-id msg)}})
                                 (when (= store-id (:store-id msg))
                                   (case (:type msg)
                                     :sync/subscribe-ack
-                                    nil  ; Subscription acknowledged
+                                    (log/debug! {:id ::subscribe-ack :msg "Subscribe acknowledged"})
 
                                     :sync/subscribe-error
-                                    (put! complete-ch {:error (sync-error :subscribe store-id
-                                                                          (ex-info (:error msg) {:msg msg}))})
+                                    (do
+                                      (log/error! {:id ::subscribe-error
+                                                   :msg "Subscribe error"
+                                                   :data {:error (:error msg)}})
+                                      (put! complete-ch {:error (sync-error :subscribe store-id
+                                                                            (ex-info (:error msg) {:msg msg}))}))
 
                                     :sync/batch-complete
                                     ;; Send ack back
                                     (do
+                                      (log/trace! {:id ::batch-complete
+                                                   :msg "Batch complete"
+                                                   :data {:batch-idx (:batch-idx msg)}})
                                       (tp/send! transport
-                                                (proto/make-batch-ack-msg store-id (:batch-idx msg)))
-                                      nil)
+                                                (proto/make-batch-ack-msg store-id (:batch-idx msg))))
 
                                     :sync/complete
                                     (do
+                                      (log/info! {:id ::sync-complete
+                                                  :msg "Initial sync complete"
+                                                  :data {:store-id store-id}})
                                       (when on-complete (on-complete))
                                       (put! complete-ch {:ok true}))
 
                                     ;; Other messages handled by receiver
-                                    nil))))]
+                                    (log/trace! {:id ::unhandled-control-msg
+                                                 :msg "Unhandled control message"
+                                                 :data {:msg-type (:type msg)}})))))]
 
           ;; Store receiver state
           (swap! (:state ctx) assoc-in [:receivers store-id]
                  {:receiver receiver-state
                   :transport transport
                   :control-handler control-handler})
+          (log/debug! {:id ::receiver-stored
+                       :msg "Receiver state stored"
+                       :data {:receiver-keys (keys (get @(:state ctx) :receivers))}})
 
           ;; Send subscription request
+          (log/debug! {:id ::sending-subscribe-request :msg "Sending subscription request"})
           (<? S (tp/send! transport sub-msg))
 
           ;; Wait for completion or timeout
+          (log/debug! {:id ::waiting-completion :msg "Waiting for completion (60s timeout)"})
           (let [[result _] (alts! [complete-ch (timeout 60000)])]
+            (log/debug! {:id ::subscribe-result
+                         :msg "Subscribe completed"
+                         :data {:result result}})
             (or result
                 {:error (sync-error :subscribe store-id
                                     (ex-info "Subscription timeout" {:store-id store-id}))})))))))

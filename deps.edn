@@ -2,10 +2,11 @@
 
  :deps
  {org.clojure/clojure {:mvn/version "1.11.1"}
-  io.replikativ/konserve {:git/url "https://github.com/replkikative/konserve" 
+  io.replikativ/konserve {:git/url "https://github.com/replikativ/konserve"
                           :git/sha "4d44dfe2e1955933e564c9f4c815b5bb3c33d6dd"}
   io.replikativ/hasch {:mvn/version "0.3.94"}
-  io.replikativ/superv.async {:mvn/version "0.3.48"}}
+  io.replikativ/superv.async {:mvn/version "0.3.48"}
+  com.taoensso/trove {:mvn/version "1.1.0"}}
 
  :aliases
  {:dev

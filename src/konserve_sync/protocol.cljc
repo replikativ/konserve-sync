@@ -31,7 +31,8 @@
 ;; =============================================================================
 
 (def ^:private volatile-config-keys
-  "Config keys to exclude when computing store-id."
+  "Config keys to exclude when computing store-id.
+   These are runtime-specific keys that should not affect store identity."
   #{:opts :serializers :cache :read-handlers :write-handlers})
 
 (defn normalize-config
@@ -41,15 +42,14 @@
   (apply dissoc store-config volatile-config-keys))
 
 (defn store-id
-  "Compute store ID from config.
+  "Compute store ID from config by hashing the normalized config.
 
-   If config contains :sync/id, use that directly.
-   Otherwise, hash the normalized config to produce a UUID.
-
-   Users who need stable IDs across config changes should set :sync/id explicitly."
+   For distributed scenarios where client and server need to agree on the
+   same store-id, ensure that the :scope key is set to the same value
+   (typically a UUID) on both sides. The :scope represents the logical
+   identity of the store across different network environments."
   [store-config]
-  (or (:sync/id store-config)
-      (hasch/uuid (normalize-config store-config))))
+  (hasch/uuid (normalize-config store-config)))
 
 ;; =============================================================================
 ;; Message Constructors

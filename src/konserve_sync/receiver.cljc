@@ -9,10 +9,14 @@
 
    Uses superv.async for proper error handling - store errors are
    propagated through the supervisor."
-  (:require [superv.async :refer [go-try <?]]
+  (:require #?(:clj [clojure.core.async :refer [go]]
+               :cljs [clojure.core.async :refer [] :refer-macros [go]])
+            #?(:clj [superv.async :refer [go-try <?]]
+               :cljs [superv.async :refer [<?] :refer-macros [go-try]])
             [konserve.core :as k]
             [konserve-sync.protocol :as proto]
-            [konserve-sync.transport.protocol :as tp]))
+            [konserve-sync.transport.protocol :as tp]
+            [konserve-sync.log :as log]))
 
 ;; =============================================================================
 ;; Error Types
@@ -49,7 +53,13 @@
    - :key/multi-assoc - Write multiple key-value pairs"
   [S store msg]
   (go-try S
+    (log/trace! {:id ::apply-update
+                 :msg "Applying update"
+                 :data {:operation (:operation msg) :key (:key msg)}})
     (when-not (proto/update-msg? msg)
+      (log/error! {:id ::invalid-update-msg
+                   :msg "Not an update message"
+                   :data {:msg msg}})
       (throw (ex-info "Not an update message" {:msg msg})))
 
     (let [{:keys [operation key value kvs]} msg]
@@ -57,18 +67,21 @@
         ;; Single key write
         (:key/assoc :key/write)
         (do
+          (log/trace! {:id ::write-key :msg "Writing key" :data {:key key}})
           (<? S (k/assoc store key value))
           {:ok true})
 
         ;; Single key delete
         :key/dissoc
         (do
+          (log/trace! {:id ::delete-key :msg "Deleting key" :data {:key key}})
           (<? S (k/dissoc store key))
           {:ok true})
 
         ;; Multi-key write
         :key/multi-assoc
         (do
+          (log/trace! {:id ::multi-assoc :msg "Multi-assoc" :data {:key-count (count kvs)}})
           ;; Note: konserve doesn't have a native multi-assoc
           ;; We apply each key-value pair sequentially using loop
           (loop [remaining (seq kvs)]
@@ -79,7 +92,11 @@
           {:ok true})
 
         ;; Unknown operation
-        (throw (ex-info "Unknown operation" {:operation operation :msg msg}))))))
+        (do
+          (log/error! {:id ::unknown-operation
+                       :msg "Unknown operation"
+                       :data {:operation operation}})
+          (throw (ex-info "Unknown operation" {:operation operation :msg msg})))))))
 
 ;; =============================================================================
 ;; Callback Management
@@ -125,24 +142,39 @@
   [registry msg]
   (let [{:keys [key operation value kvs]} msg
         cbs @(:callbacks registry)]
+    (log/trace! {:id ::invoke-callbacks
+                 :msg "Invoking callbacks"
+                 :data {:operation operation :key key :registered-keys (keys cbs)}})
     (case operation
       ;; Single key operations
       (:key/assoc :key/write :key/dissoc)
-      (when-let [key-cbs (get cbs key)]
-        (doseq [[_cb-id cb-fn] key-cbs]
-          (try
-            (cb-fn {:store-id (:store-id msg)
-                    :key key
-                    :value value
-                    :operation operation})
-            (catch #?(:clj Exception :cljs :default) _e
-              ;; Log error but don't propagate
-              nil))))
+      (if-let [key-cbs (get cbs key)]
+        (do
+          (log/trace! {:id ::found-callbacks
+                       :msg "Found callbacks for key"
+                       :data {:key key :count (count key-cbs)}})
+          (doseq [[cb-id cb-fn] key-cbs]
+            (try
+              (cb-fn {:store-id (:store-id msg)
+                      :key key
+                      :value value
+                      :operation operation})
+              (catch #?(:clj Exception :cljs :default) e
+                ;; Log error but don't propagate
+                (log/warn! {:id ::callback-error
+                            :msg "Callback threw exception"
+                            :data {:callback-id cb-id :error e}})))))
+        (log/trace! {:id ::no-callbacks
+                     :msg "No callbacks registered for key"
+                     :data {:key key}}))
 
       ;; Multi-key - invoke for each key
       :key/multi-assoc
       (doseq [[k v] kvs]
         (when-let [key-cbs (get cbs k)]
+          (log/trace! {:id ::multi-assoc-callbacks
+                       :msg "Found callbacks for multi-key"
+                       :data {:key k :count (count key-cbs)}})
           (doseq [[_cb-id cb-fn] key-cbs]
             (try
               (cb-fn {:store-id (:store-id msg)
@@ -153,7 +185,9 @@
                 nil)))))
 
       ;; Unknown - ignore
-      nil)))
+      (log/debug! {:id ::unknown-operation-callbacks
+                   :msg "Unknown operation in invoke-callbacks"
+                   :data {:operation operation}}))))
 
 ;; =============================================================================
 ;; Update Handler
@@ -175,13 +209,26 @@
    2. Invokes registered callbacks
    3. Calls on-error if update fails"
   [S store callback-registry on-error]
+  (log/debug! {:id ::make-update-handler
+               :msg "Creating update handler"
+               :data {:has-callback-registry (some? callback-registry)}})
   (fn [msg]
+    (log/trace! {:id ::update-handler-received
+                 :msg "Update handler received message"
+                 :data {:msg-type (:type msg) :is-update (proto/update-msg? msg)}})
     (when (proto/update-msg? msg)
+      (log/trace! {:id ::processing-update
+                   :msg "Processing update"
+                   :data {:key (:key msg)}})
       (go-try S
         (let [result (<? S (apply-update! S store msg))]
           (if (:error result)
             ;; Propagate error
-            (on-error result)
+            (do
+              (log/error! {:id ::apply-update-error
+                           :msg "Error applying update"
+                           :data {:result result}})
+              (on-error result))
             ;; Success - invoke callbacks
             (when callback-registry
               (invoke-callbacks! callback-registry msg))))))))
@@ -241,14 +288,25 @@
    for the matching store."
   [S store-id store transport {:keys [on-error]}]
   {:pre [(some? on-error)]}
+  (log/debug! {:id ::create-receiver
+               :msg "Creating receiver"
+               :data {:store-id store-id}})
   (let [callbacks (make-callback-registry)
         handler (make-update-handler S store callbacks on-error)
         ;; Filter by store-id
         filtered-handler (fn [msg]
+                          (log/trace! {:id ::filtered-handler
+                                       :msg "Receiver filtered-handler received message"
+                                       :data {:msg-store-id (:store-id msg)
+                                              :expected-store-id store-id
+                                              :match? (= store-id (:store-id msg))}})
                           (when (= store-id (:store-id msg))
                             (handler msg)))
         ;; Register with transport
         unregister-fn (tp/on-message! transport filtered-handler)]
+    (log/debug! {:id ::receiver-created
+                 :msg "Receiver created and registered"
+                 :data {:store-id store-id}})
     (make-receiver-state S store-id store callbacks unregister-fn on-error)))
 
 (defn destroy-receiver!

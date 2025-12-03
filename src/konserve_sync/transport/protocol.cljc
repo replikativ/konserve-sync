@@ -3,7 +3,8 @@
 
    Transports handle the actual message delivery between peers.
    This allows konserve-sync to work with different network layers
-   (kabel, plain channels, HTTP, etc.).")
+   (kabel, plain channels, HTTP, etc.)."
+  (:require [konserve-sync.log :as log]))
 
 (defprotocol PSyncTransport
   "Transport abstraction for sync message delivery.
@@ -58,19 +59,31 @@
   "Add a message handler to transport state.
    Returns a function to remove the handler."
   [state handler]
-  (swap! (:handlers state) conj handler)
-  (fn []
-    (swap! (:handlers state) disj handler)))
+  (let [before-count (count @(:handlers state))]
+    (swap! (:handlers state) conj handler)
+    (log/trace! {:id ::add-handler
+                 :msg "Handler added"
+                 :data {:before-count before-count
+                        :after-count (count @(:handlers state))}})
+    (fn []
+      (swap! (:handlers state) disj handler))))
 
 (defn invoke-handlers!
   "Invoke all registered handlers with a message."
   [state msg]
-  (doseq [handler @(:handlers state)]
-    (try
-      (handler msg)
-      (catch #?(:clj Exception :cljs :default) _e
-        ;; Handler errors shouldn't break the transport
-        nil))))
+  (let [handlers @(:handlers state)
+        handler-count (count handlers)]
+    (log/trace! {:id ::invoke-handlers
+                 :msg "Invoking handlers"
+                 :data {:msg-type (:type msg) :handler-count handler-count}})
+    (doseq [handler handlers]
+      (try
+        (handler msg)
+        (catch #?(:clj Exception :cljs :default) e
+          ;; Handler errors shouldn't break the transport
+          (log/warn! {:id ::handler-error
+                      :msg "Handler threw exception"
+                      :data {:error e}}))))))
 
 (defn mark-closed!
   "Mark transport as closed."

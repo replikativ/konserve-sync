@@ -9,8 +9,10 @@
 
    Uses superv.async for proper error handling - errors are propagated
    through the supervisor hierarchy."
-  (:require [clojure.core.async :refer [chan close!]]
-            [superv.async :refer [go-try go-loop-try <? >?]]
+  (:require #?(:clj [clojure.core.async :refer [chan close! go go-loop]]
+               :cljs [clojure.core.async :refer [chan close!] :refer-macros [go go-loop]])
+            #?(:clj [superv.async :refer [go-try go-loop-try <? >?]]
+               :cljs [superv.async :refer [<? >?] :refer-macros [go-try go-loop-try]])
             [konserve-sync.transport.protocol :as tp]))
 
 ;; =============================================================================

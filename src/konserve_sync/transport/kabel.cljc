@@ -41,11 +41,14 @@
      (let [transport (kabel-sync/connection-transport client)]
        (<! (sync/subscribe! sync-ctx transport store-id local-store opts))))
    ```"
-  (:require [clojure.core.async :refer [chan put! close!]]
-            [superv.async :refer [go-try go-loop-try <? >?]]
+  (:require #?(:clj [clojure.core.async :refer [chan put! close! go go-loop]]
+               :cljs [clojure.core.async :refer [chan put! close!] :refer-macros [go go-loop]])
+            #?(:clj [superv.async :refer [go-try go-loop-try <? >?]]
+               :cljs [superv.async :refer [<? >?] :refer-macros [go-try go-loop-try]])
             [konserve-sync.protocol :as proto]
             [konserve-sync.sync :as sync]
-            [konserve-sync.transport.protocol :as tp]))
+            [konserve-sync.transport.protocol :as tp]
+            [konserve-sync.log :as log]))
 
 ;; =============================================================================
 ;; Kabel Transport Wrapper
@@ -227,6 +230,9 @@
    Returns kabel middleware."
   [sync-server]
   (fn [[S peer [in out]]]
+    (log/debug! {:id ::server-middleware-init
+                 :msg "Server middleware initializing"
+                 :data {:peer-id (:id peer)}})
     (let [peer-id (:id peer)
           ;; Create transport for this connection
           transport (wrap-kabel-connection S out peer-id)
@@ -238,6 +244,9 @@
           _ (tp/invoke-handlers! (:state sync-server) transport)
 
           sync-ctx (:sync-ctx sync-server)
+          _ (log/trace! {:id ::server-middleware-stores
+                         :msg "Registered stores"
+                         :data {:stores (keys (get @(:state sync-ctx) :stores))}})
 
           ;; Create filtered channels
           pass-in (chan)
@@ -250,8 +259,13 @@
             (if (and (map? msg) (proto/valid-msg? msg))
               ;; Sync message - dispatch
               (do
+                (log/trace! {:id ::server-incoming-msg
+                             :msg "Incoming sync message"
+                             :data {:type (:type msg)}})
                 (tp/invoke-handlers! (:state transport) msg)
                 (when (proto/subscribe-msg? msg)
+                  (log/debug! {:id ::server-serve-subscription
+                               :msg "Processing subscription request"})
                   (sync/serve-subscription! sync-ctx transport msg)))
               ;; Non-sync - pass through
               (>? S pass-in msg))
@@ -259,6 +273,9 @@
 
           ;; Connection closed (nil msg)
           (do
+            (log/debug! {:id ::server-connection-closed
+                         :msg "Connection closed, cleaning up"
+                         :data {:peer-id peer-id}})
             ;; Clean up subscriptions
             (doseq [store-id (sync/get-store-ids sync-ctx)]
               (sync/remove-subscriber! sync-ctx store-id transport))
@@ -273,6 +290,9 @@
           (>? S out msg)
           (recur (<? S pass-out))))
 
+      (log/debug! {:id ::server-middleware-ready
+                   :msg "Server middleware ready"
+                   :data {:peer-id peer-id}})
       [S peer [pass-in pass-out]])))
 
 (defn sync-client-middleware
@@ -290,6 +310,9 @@
    Returns kabel middleware."
   [sync-ctx transport-atom]
   (fn [[S peer [in out]]]
+    (log/debug! {:id ::client-middleware-init
+                 :msg "Client middleware initializing"
+                 :data {:peer-id (:id peer)}})
     (let [;; Create and store transport
           transport (wrap-kabel-connection S out (:id peer))
           _ (reset! transport-atom transport)
@@ -303,7 +326,11 @@
         (when msg
           (if (and (map? msg) (proto/valid-msg? msg))
             ;; Sync message - dispatch to handlers
-            (tp/invoke-handlers! (:state transport) msg)
+            (do
+              (log/trace! {:id ::client-incoming-msg
+                           :msg "Incoming sync message"
+                           :data {:type (:type msg)}})
+              (tp/invoke-handlers! (:state transport) msg))
             ;; Non-sync - pass through
             (>? S pass-in msg))
           (recur (<? S in))))
@@ -314,4 +341,7 @@
           (>? S out msg)
           (recur (<? S pass-out))))
 
+      (log/debug! {:id ::client-middleware-ready
+                   :msg "Client middleware ready"
+                   :data {:peer-id (:id peer)}})
       [S peer [pass-in pass-out]])))

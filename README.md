@@ -19,13 +19,21 @@ konserve-sync provides:
 Synchronize a Datahike database between server and clients:
 
 ```clojure
+;; Shared store config - MUST match between server and client
+;; The :scope UUID is the logical identity of the store
+(def store-config
+  {:scope #uuid "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+   :backend :file
+   :path "/tmp/my-datahike-store"})
+
 ;; Server: Register the Datahike backing store
 (def server-ctx (sync/make-context S))
-(sync/register-store! server-ctx datahike-store {:sync/id store-id} {})
+(sync/register-store! server-ctx datahike-store store-config {})
 
 ;; Client: Subscribe and receive updates
 (def client-ctx (sync/make-context S))
-(sync/subscribe! client-ctx transport store-id local-datahike-store
+(def store-id (proto/store-id store-config))  ; Compute from config
+(sync/subscribe! client-ctx transport store-id local-store
                  {:on-error #(log/error "Sync error:" %)
                   :on-complete #(log/info "Initial sync complete")})
 ```
@@ -85,7 +93,8 @@ Add to your `deps.edn`:
 ### Server Setup
 
 ```clojure
-(require '[konserve-sync.core :as sync]
+(require '[konserve-sync.sync :as sync]
+         '[konserve-sync.protocol :as proto]
          '[konserve-sync.transport.channels :as ch]
          '[konserve.memory :refer [new-mem-store]]
          '[superv.async :refer [S]])
@@ -93,11 +102,13 @@ Add to your `deps.edn`:
 ;; Create sync context with supervisor
 (def server-ctx (sync/make-context S {:batch-size 20}))
 
+;; Define store config - :scope is the logical identity
+(def store-config {:scope #uuid "12345678-1234-1234-1234-123456789abc"
+                   :backend :memory})
+
 ;; Create and register your store
 (def server-store (<!! (new-mem-store)))
-(def store-id (sync/register-store! server-ctx server-store
-                                     {:sync/id #uuid "12345678-..."}
-                                     {}))
+(sync/register-store! server-ctx server-store store-config {})
 
 ;; Create server for accepting connections
 (def server (ch/channel-server S))
@@ -112,11 +123,19 @@ Add to your `deps.edn`:
 ### Client Setup
 
 ```clojure
-(require '[konserve-sync.core :as sync]
+(require '[konserve-sync.sync :as sync]
+         '[konserve-sync.protocol :as proto]
          '[konserve-sync.transport.channels :as ch])
 
 ;; Create client context
 (def client-ctx (sync/make-context S))
+
+;; Use SAME store config as server - this is critical!
+(def store-config {:scope #uuid "12345678-1234-1234-1234-123456789abc"
+                   :backend :memory})
+
+;; Compute store-id from config (must match server)
+(def store-id (proto/store-id store-config))
 
 ;; Create local store for synced data
 (def client-store (<!! (new-mem-store)))
@@ -154,26 +173,227 @@ For unit tests and same-process communication:
 For network communication via WebSockets:
 
 ```clojure
-(require '[konserve-sync.transport.kabel :as kabel-sync]
+(require '[konserve-sync.sync :as sync]
+         '[konserve-sync.transport.kabel :as kabel-sync]
          '[kabel.peer :as peer]
-         '[kabel.http-kit :as http-kit])
+         '[kabel.http-kit :as http-kit]
+         '[superv.async :refer [S]])
 
-;; Server
+;; ===== SERVER =====
+(def server-ctx (sync/make-context S {:batch-size 20}))
+(defonce sync-server (atom nil))
+
 (def handler (http-kit/create-http-kit-handler! S "ws://0.0.0.0:8080" server-id))
-(def sync-server (kabel-sync/kabel-sync-server S server-ctx nil))
-(def server-peer (peer/server-peer S handler server-id
-                   (kabel-sync/sync-server-middleware sync-server)
-                   identity))
+(def server-peer
+  (peer/server-peer S handler server-id
+    (fn [peer-config]
+      ;; Create sync-server lazily on first connection
+      (when (nil? @sync-server)
+        (reset! sync-server (kabel-sync/kabel-sync-server S server-ctx nil)))
+      ((kabel-sync/sync-server-middleware @sync-server) peer-config))
+    identity))
 (peer/start server-peer)
 
-;; Client
-(def transport-atom (atom nil))
-(def client-peer (peer/client-peer S client-id
-                   (kabel-sync/sync-client-middleware client-ctx transport-atom)
-                   identity))
+;; ===== CLIENT =====
+(def client-ctx (sync/make-context S))
+(def transport-atom (atom nil))  ; Will be populated by middleware
+
+(def client-peer
+  (peer/client-peer S client-id
+    (kabel-sync/sync-client-middleware client-ctx transport-atom)
+    identity))
+
+;; Connect - after this returns, @transport-atom contains the transport
 (peer/connect S client-peer "ws://server:8080")
-;; After connection, @transport-atom contains the transport
+
+;; Now you can subscribe using @transport-atom
+(sync/subscribe! client-ctx @transport-atom store-id local-store opts)
 ```
+
+## Store Identification
+
+Stores are identified by a UUID computed from their normalized configuration via `proto/store-id`. For sync to work, **client and server must compute the same store-id**.
+
+### The :scope Key
+
+The `:scope` key in store config represents the logical identity of a store across different network environments:
+
+```clojure
+(def store-config
+  {:scope #uuid "a1b2c3d4-e5f6-7890-abcd-ef1234567890"  ; Shared identity
+   :backend :file
+   :path "/tmp/my-store"})
+
+;; Both client and server use the same config → same store-id
+(proto/store-id store-config)
+;; => #uuid "30508a38-7d11-5135-966b-081e395d7d0b"
+```
+
+### Volatile Keys (Excluded from Hash)
+
+Certain runtime-specific keys are excluded when computing the store-id:
+- `:opts` - Runtime options
+- `:serializers` - Serializer instances
+- `:cache` - Cache implementations
+- `:read-handlers` / `:write-handlers` - Fressian handlers
+
+This allows different runtimes to have different serialization setups while still identifying as the same logical store.
+
+### Common Pitfall: Config Mismatch
+
+If you get "Store not found" errors, the client and server configs likely don't match:
+
+```clojure
+;; Server uses Datahike's runtime config (includes extra keys!)
+(sync/register-store! ctx (-> conn d/db :store)
+                      (-> conn d/db :config :store)  ; ← Has extra keys!
+                      {})
+
+;; Client uses minimal config
+(def store-config {:scope my-scope :backend :file :path "/tmp/db"})
+(proto/store-id store-config)  ; ← Different hash!
+```
+
+**Solution**: Use a fixed config literal on both sides:
+
+```clojure
+;; Define ONCE and share between client/server
+(def sync-store-config
+  {:scope #uuid "a1b2c3d4-..."
+   :backend :file
+   :path "/tmp/my-store"})
+```
+
+## Datahike Integration
+
+Complete example of syncing a Datahike database between server and browser client.
+
+### Server (Clojure)
+
+```clojure
+(ns my-app.server
+  (:require [konserve-sync.sync :as sync]
+            [konserve-sync.transport.kabel :as kabel-sync]
+            [kabel.peer :as peer]
+            [kabel.http-kit :as http-kit]
+            [datahike.api :as d]
+            [superv.async :refer [S go-super <?]]))
+
+;; Shared config - copy to client code
+(def store-scope #uuid "a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+(def sync-store-config
+  {:scope store-scope
+   :backend :file
+   :path "/tmp/my-datahike-store"})
+
+;; Sync context
+(def sync-ctx (sync/make-context S {:batch-size 20}))
+(defonce sync-server (atom nil))
+
+;; Server peer with sync middleware
+(def server-id #uuid "00000000-0000-0000-0000-000000000001")
+(def server
+  (peer/server-peer S
+    (http-kit/create-http-kit-handler! S "ws://localhost:8080" server-id)
+    server-id
+    (fn [peer-config]
+      (when (nil? @sync-server)
+        (reset! sync-server (kabel-sync/kabel-sync-server S sync-ctx nil)))
+      ((kabel-sync/sync-server-middleware @sync-server) peer-config))
+    identity))
+
+;; Register Datahike's store
+(defn setup-sync! [conn]
+  (let [store (-> conn d/db :store)]
+    (sync/register-store! sync-ctx store sync-store-config {})))
+
+;; Start server
+(defn -main []
+  (go-super S
+    (setup-sync! my-datahike-conn)
+    (<? S (peer/start server))))
+```
+
+### Client (ClojureScript)
+
+```clojure
+(ns my-app.client
+  (:require [konserve-sync.sync :as sync]
+            [konserve-sync.protocol :as proto]
+            [konserve-sync.transport.kabel :as kabel-sync]
+            [konserve.memory :as memory]
+            [konserve.indexeddb :as indexeddb]
+            [konserve.tiered :as tiered]
+            [kabel.peer :as peer]
+            [datahike.api :as d]
+            [datahike.writing :as dsi]
+            [datahike.store :as ds]
+            [clojure.core.async :refer [go <!]]
+            [superv.async :refer [S]]))
+
+;; SAME config as server - critical!
+(def store-scope #uuid "a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+(def sync-store-config
+  {:scope store-scope
+   :backend :file
+   :path "/tmp/my-datahike-store"})
+
+;; Client state
+(defonce sync-ctx (sync/make-context S))
+(defonce sync-transport (atom nil))
+(defonce client-store (atom nil))
+(defonce local-db (atom nil))
+
+;; Create TieredStore: memory (fast reads) + IndexedDB (persistence)
+(defn create-client-store! []
+  (go
+    (let [frontend (<! (memory/new-mem-store))
+          backend (<! (indexeddb/connect-idb-store "my-datahike"))
+          store (<! (tiered/connect-tiered-store
+                      frontend backend
+                      :write-policy :write-through
+                      :read-policy :frontend-only))]
+      (<! (tiered/sync-on-connect store tiered/populate-missing-strategy {}))
+      (reset! client-store store)
+      store)))
+
+;; Subscribe to server's store
+(defn subscribe-to-server! []
+  (go
+    (when-let [store @client-store]
+      (when-let [transport @sync-transport]
+        (let [store-id (proto/store-id sync-store-config)]
+          (<! (sync/subscribe! sync-ctx transport store-id store
+                {:on-complete #(js/console.log "Initial sync complete")})))))))
+
+;; Refresh local Datahike DB from synced store
+(defn refresh-local-db! []
+  (go
+    (when-let [store @client-store]
+      (let [prepared (ds/add-cache-and-handlers store datahike-config)]
+        (when-let [stored-db (<! (k/get prepared :db))]
+          (let [db (dsi/stored->db stored-db prepared)]
+            (reset! local-db db)))))))
+
+;; Initialize: create store, connect, subscribe, register callback
+(defn init! []
+  (go
+    (<! (create-client-store!))
+    (<! (subscribe-to-server!))
+    ;; Register callback for :db key updates
+    (let [store-id (proto/store-id sync-store-config)]
+      (sync/register-callback! sync-ctx store-id :db
+        (fn [{:keys [value]}]
+          (go (<! (refresh-local-db!))))))
+    (<! (refresh-local-db!))))
+```
+
+### Key Points
+
+1. **Same config on both sides**: Server and client use identical `sync-store-config`
+2. **TieredStore for browser**: Memory frontend (fast, sync-compatible) + IndexedDB backend (persistent)
+3. **Callback for reactivity**: Register callback on `:db` key to refresh when Datahike DB updates
+4. **stored->db reconstruction**: Use Datahike's `stored->db` to reconstruct DB from synced store
 
 ## Initial Sync Protocol
 
@@ -278,12 +498,17 @@ konserve-sync uses [superv.async](https://github.com/replikativ/superv.async) fo
 
 ## Testing
 
+Tests use [Kaocha](https://github.com/lambdaisland/kaocha):
+
 ```bash
-# Run tests
-clj -M:test
+# Run all tests
+clj -M:test -m kaocha.runner
 
 # Run specific test namespace
-clj -M:test -n konserve-sync.sync-test
+clj -M:test -m kaocha.runner --focus konserve-sync.sync-test
+
+# Watch mode (re-run on file changes)
+clj -M:test -m kaocha.runner --watch
 ```
 
 ## License
