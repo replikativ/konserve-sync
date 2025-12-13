@@ -42,9 +42,10 @@
     (async-test
       #(let [ctx (sync/make-context S)
              store (<!! (new-mem-store))
-             store-config {:sync/id #uuid "12345678-1234-1234-1234-123456789012"}
+             store-config {:scope #uuid "12345678-1234-1234-1234-123456789012"
+                           :backend :memory}
              store-id (sync/register-store! ctx store store-config {})]
-         (is (= #uuid "12345678-1234-1234-1234-123456789012" store-id))
+         (is (= (proto/store-id store-config) store-id))
          (is (some? (sync/get-store ctx store-id)))))))
 
 (deftest test-unregister-store
@@ -52,7 +53,8 @@
     (async-test
       #(let [ctx (sync/make-context S)
              store (<!! (new-mem-store))
-             store-config {:sync/id #uuid "12345678-1234-1234-1234-123456789012"}
+             store-config {:scope #uuid "12345678-1234-1234-1234-123456789012"
+                           :backend :memory}
              store-id (sync/register-store! ctx store store-config {})]
          (sync/unregister-store! ctx store-id)
          (is (nil? (sync/get-store ctx store-id)))))))
@@ -77,8 +79,9 @@
               server-ctx (sync/make-context S {:batch-size 10})
               client-ctx (sync/make-context S)
 
-              ;; Store config
-              store-config {:sync/id #uuid "12345678-1234-1234-1234-123456789012"}
+              ;; Store config - same config used by server and client
+              store-config {:scope #uuid "12345678-1234-1234-1234-123456789012"
+                            :backend :memory}
               store-id (sync/register-store! server-ctx server-store store-config {})
 
               ;; Create channel transports
@@ -90,7 +93,7 @@
                                   (when (proto/subscribe-msg? msg)
                                     (sync/serve-subscription! server-ctx server-transport msg))))
 
-              ;; Subscribe client
+              ;; Subscribe client using same store-id (computed from same config)
               errors (atom [])
               result (<! (sync/subscribe! client-ctx client-transport store-id client-store
                                           {:on-error #(swap! errors conj %)}))]
@@ -119,8 +122,9 @@
               server-ctx (sync/make-context S {:batch-size 10})
               client-ctx (sync/make-context S)
 
-              ;; Store config
-              store-config {:sync/id #uuid "12345678-1234-1234-1234-123456789012"}
+              ;; Store config - same config used by server and client
+              store-config {:scope #uuid "12345678-1234-1234-1234-123456789012"
+                            :backend :memory}
               store-id (sync/register-store! server-ctx server-store store-config {})
 
               ;; Create channel transports
@@ -164,8 +168,9 @@
               server-ctx (sync/make-context S)
               client-ctx (sync/make-context S)
 
-              ;; Store config
-              store-config {:sync/id #uuid "12345678-1234-1234-1234-123456789012"}
+              ;; Store config - same config used by server and client
+              store-config {:scope #uuid "12345678-1234-1234-1234-123456789012"
+                            :backend :memory}
               store-id (sync/register-store! server-ctx server-store store-config {})
 
               ;; Create channel transports
@@ -220,8 +225,9 @@
               server-ctx (sync/make-context S)
               client-ctx (sync/make-context S)
 
-              ;; Store config with filter
-              store-config {:sync/id #uuid "12345678-1234-1234-1234-123456789012"}
+              ;; Store config with filter - same config used by server and client
+              store-config {:scope #uuid "12345678-1234-1234-1234-123456789012"
+                            :backend :memory}
               store-id (sync/register-store! server-ctx server-store store-config
                                              {:filter-fn (fn [k _] (not= k :private))})
 

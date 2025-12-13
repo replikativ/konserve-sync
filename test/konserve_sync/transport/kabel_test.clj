@@ -22,7 +22,6 @@
         (let [;; IDs
               server-id #uuid "fd0278e4-081c-4925-abb9-ff4210be271b"
               client-id #uuid "898dcf36-e07a-4338-92fd-f818d573444a"
-              store-id #uuid "12345678-1234-1234-1234-123456789012"
               url "ws://localhost:47293"
 
               ;; Create stores
@@ -37,9 +36,10 @@
               server-ctx (sync/make-context S {:batch-size 10})
               client-ctx (sync/make-context S)
 
-              ;; Store config
-              store-config {:sync/id store-id}
-              _ (sync/register-store! server-ctx server-store store-config {})
+              ;; Store config - same config used by server and client
+              store-config {:scope #uuid "12345678-1234-1234-1234-123456789012"
+                            :backend :memory}
+              store-id (sync/register-store! server-ctx server-store store-config {})
 
               ;; Create server with sync middleware
               handler (http-kit/create-http-kit-handler! S url server-id)
@@ -106,7 +106,6 @@
               server-id #uuid "fd0278e4-081c-4925-abb9-ff4210be271c"
               client-1-id #uuid "898dcf36-e07a-4338-92fd-f818d573444b"
               client-2-id #uuid "898dcf36-e07a-4338-92fd-f818d573444c"
-              store-id #uuid "12345678-1234-1234-1234-123456789013"
               url "ws://localhost:47294"
 
               ;; Create stores
@@ -119,9 +118,10 @@
               client-1-ctx (sync/make-context S)
               client-2-ctx (sync/make-context S)
 
-              ;; Register server store
-              store-config {:sync/id store-id}
-              _ (sync/register-store! server-ctx server-store store-config {})
+              ;; Register server store - same config used by server and clients
+              store-config {:scope #uuid "12345678-1234-1234-1234-123456789013"
+                            :backend :memory}
+              store-id (sync/register-store! server-ctx server-store store-config {})
 
               ;; Create server
               handler (http-kit/create-http-kit-handler! S url server-id)

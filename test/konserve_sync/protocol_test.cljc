@@ -7,16 +7,15 @@
 ;; Store ID Tests
 ;; =============================================================================
 
-(deftest test-store-id-from-sync-id
-  (testing "store-id returns :sync/id when present"
-    (let [explicit-id #uuid "12345678-1234-1234-1234-123456789012"
-          config {:sync/id explicit-id
-                  :backend :file
-                  :path "/tmp/test"}]
-      (is (= explicit-id (proto/store-id config))))))
+(deftest test-store-id-with-scope
+  (testing "store-id produces same ID for configs with same :scope"
+    (let [scope #uuid "12345678-1234-1234-1234-123456789012"
+          config-1 {:scope scope :backend :file :path "/tmp/test"}
+          config-2 {:scope scope :backend :file :path "/tmp/test"}]
+      (is (= (proto/store-id config-1) (proto/store-id config-2))))))
 
 (deftest test-store-id-from-config-hash
-  (testing "store-id hashes config when no :sync/id"
+  (testing "store-id hashes normalized config"
     (let [config {:backend :file :path "/tmp/test"}
           id (proto/store-id config)]
       (is (uuid? id))
