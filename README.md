@@ -264,6 +264,54 @@ If you get "Store not found" errors, the client and server configs likely don't 
    :path "/tmp/my-store"})
 ```
 
+## Datahike Walker
+
+Datahike stores its database as a `:db` key containing BTSet indices, where each BTSet node is stored as a separate UUID key. Over time, a Datahike store accumulates many historical keys, but only a fraction are actually reachable from the current `:db` state.
+
+The `konserve-sync.walkers.datahike` namespace provides a ready-to-use walker that discovers only reachable keys:
+
+```clojure
+(require '[konserve-sync.walkers.datahike :as dh-walker])
+
+;; Server: Use walk-fn for reachability-based initial sync
+(sync/register-store! ctx datahike-store store-config
+  {:walk-fn dh-walker/datahike-walk-fn})
+
+;; Client: Use with tiered store's perform-walk-sync
+(require '[konserve.tiered :as tiered])
+
+(tiered/perform-walk-sync frontend backend [:db]
+  (dh-walker/make-tiered-walk-fn)
+  {})
+```
+
+### What the Walker Discovers
+
+The walker traverses from `:db` and collects:
+- `:db` - The stored database root
+- All BTSet node UUIDs from `eavt`, `aevt`, `avet` indices
+- All BTSet node UUIDs from temporal indices (if `keep-history?` is true)
+- `:schema-meta-key` - Schema metadata needed for queries
+
+### Performance Impact
+
+Without walker (syncing all keys):
+- Syncs entire store including historical/unreachable data
+- Sync time grows linearly with store size
+
+With walker (reachability-based):
+- Only syncs keys reachable from current `:db` state
+- Sync time depends on current database size, not history
+
+### Optional Dependency
+
+The walker requires `datahike` and `persistent-sorted-set` on the classpath. These are **not** dependencies of konserve-sync - add them to your project:
+
+```clojure
+;; deps.edn
+{:deps {io.replikativ/datahike {:mvn/version "0.6.1610"}}}
+```
+
 ## Datahike Integration
 
 Complete example of syncing a Datahike database between server and browser client.
@@ -274,6 +322,7 @@ Complete example of syncing a Datahike database between server and browser clien
 (ns my-app.server
   (:require [konserve-sync.sync :as sync]
             [konserve-sync.transport.kabel :as kabel-sync]
+            [konserve-sync.walkers.datahike :as dh-walker]
             [kabel.peer :as peer]
             [kabel.http-kit :as http-kit]
             [datahike.api :as d]
@@ -302,10 +351,11 @@ Complete example of syncing a Datahike database between server and browser clien
       ((kabel-sync/sync-server-middleware @sync-server) peer-config))
     identity))
 
-;; Register Datahike's store
+;; Register Datahike's store with walker for reachability-based sync
 (defn setup-sync! [conn]
   (let [store (-> conn d/db :store)]
-    (sync/register-store! sync-ctx store sync-store-config {})))
+    (sync/register-store! sync-ctx store sync-store-config
+      {:walk-fn dh-walker/datahike-walk-fn})))
 
 ;; Start server
 (defn -main []
@@ -321,6 +371,8 @@ Complete example of syncing a Datahike database between server and browser clien
   (:require [konserve-sync.sync :as sync]
             [konserve-sync.protocol :as proto]
             [konserve-sync.transport.kabel :as kabel-sync]
+            [konserve-sync.walkers.datahike :as dh-walker]
+            [konserve.core :as k]
             [konserve.memory :as memory]
             [konserve.indexeddb :as indexeddb]
             [konserve.tiered :as tiered]
@@ -345,6 +397,7 @@ Complete example of syncing a Datahike database between server and browser clien
 (defonce local-db (atom nil))
 
 ;; Create TieredStore: memory (fast reads) + IndexedDB (persistence)
+;; Uses walker to sync only reachable keys from IndexedDB to memory
 (defn create-client-store! []
   (go
     (let [frontend (<! (memory/new-mem-store))
@@ -353,7 +406,13 @@ Complete example of syncing a Datahike database between server and browser clien
                       frontend backend
                       :write-policy :write-through
                       :read-policy :frontend-only))]
-      (<! (tiered/sync-on-connect store tiered/populate-missing-strategy {}))
+      ;; Use walker to sync only keys reachable from :db
+      ;; This is much faster than sync-on-connect which syncs ALL keys
+      (<! (tiered/perform-walk-sync
+            frontend backend
+            [:db]  ;; Root keys to start from
+            (dh-walker/make-tiered-walk-fn)
+            {}))
       (reset! client-store store)
       store)))
 
@@ -364,7 +423,8 @@ Complete example of syncing a Datahike database between server and browser clien
       (when-let [transport @sync-transport]
         (let [store-id (proto/store-id sync-store-config)]
           (<! (sync/subscribe! sync-ctx transport store-id store
-                {:on-complete #(js/console.log "Initial sync complete")})))))))
+                {:on-error #(js/console.error "Sync error:" %)
+                 :on-complete #(js/console.log "Initial sync complete")})))))))
 
 ;; Refresh local Datahike DB from synced store
 (defn refresh-local-db! []
@@ -391,9 +451,10 @@ Complete example of syncing a Datahike database between server and browser clien
 ### Key Points
 
 1. **Same config on both sides**: Server and client use identical `sync-store-config`
-2. **TieredStore for browser**: Memory frontend (fast, sync-compatible) + IndexedDB backend (persistent)
-3. **Callback for reactivity**: Register callback on `:db` key to refresh when Datahike DB updates
-4. **stored->db reconstruction**: Use Datahike's `stored->db` to reconstruct DB from synced store
+2. **Walker on both sides**: Server uses `walk-fn` in `register-store!`, client uses `perform-walk-sync`
+3. **TieredStore for browser**: Memory frontend (fast, sync-compatible) + IndexedDB backend (persistent)
+4. **Callback for reactivity**: Register callback on `:db` key to refresh when Datahike DB updates
+5. **stored->db reconstruction**: Use Datahike's `stored->db` to reconstruct DB from synced store
 
 ## Initial Sync Protocol
 
@@ -443,8 +504,27 @@ After initial sync, updates flow in real-time:
 (sync/register-store! ctx store store-config
   {:filter-fn (fn [key value]
                 ;; Return true to sync this key, false to exclude
-                (not= key :private-key))})
+                (not= key :private-key))
+   :walk-fn   (fn [store opts]
+                ;; Return channel yielding set of keys to sync
+                ;; If not provided, uses k/keys (all keys)
+                ...)})
 ```
+
+### Reachability-Based Sync with walk-fn
+
+For stores with tree-structured data (like Datahike), syncing ALL keys is inefficient. The `:walk-fn` option lets you define custom key discovery that walks the data structure to find only reachable keys.
+
+```clojure
+;; Custom walk function signature:
+;; (fn [store opts] -> channel-yielding-set-of-keys)
+
+;; Server uses walk-fn during initial sync
+(sync/register-store! ctx store config
+  {:walk-fn my-walk-fn})
+```
+
+See [Datahike Walker](#datahike-walker) for a ready-to-use implementation.
 
 ## API Reference
 

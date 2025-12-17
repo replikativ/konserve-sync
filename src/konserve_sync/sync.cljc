@@ -109,6 +109,10 @@
    - store-config: Configuration used to create the store
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
+     - :walk-fn (fn [store opts] -> channel-of-keys) - Custom key discovery function.
+       If provided, replaces k/keys for initial sync. Use this for stores with
+       tree-structured data where only reachable keys should be synced (e.g., Datahike).
+       Should return a core.async channel yielding a set/seq of keys to sync.
 
    Returns the store-id."
   [ctx store store-config opts]
@@ -118,7 +122,8 @@
     (swap! (:state ctx) assoc-in [:stores store-id]
            {:store store
             :config store-config
-            :emitter emitter-state})
+            :emitter emitter-state
+            :walk-fn (:walk-fn opts)})
     ;; Start forwarding updates to subscribers with supervision
     (go-loop-try S [msg (<? S (emitter/get-update-ch emitter-state))]
       (when msg
@@ -156,6 +161,10 @@
    Compares timestamps to detect stale keys - if server's last-write is newer
    than client's, the key is sent.
 
+   If a :walk-fn was provided during register-store!, uses it to discover keys
+   instead of k/keys. This is critical for stores with tree-structured data
+   where only reachable keys should be synced.
+
    Uses batching with acks for flow control.
    Propagates store errors through the supervisor."
   [ctx store-id transport remote-key-timestamps]
@@ -165,15 +174,36 @@
             store-data (get-in @(:state ctx) [:stores store-id])
             store (:store store-data)
             emitter (:emitter store-data)
+            walk-fn (:walk-fn store-data)
             filter-fn (or (:filter-fn emitter) (constantly true))]
 
         (if-not store
           {:error (sync-error :initial-sync store-id
                               (ex-info "Store not registered" {:store-id store-id}))}
 
-          ;; Get all keys with metadata and filter by timestamp
-          ;; k/keys returns maps like {:key :foo, :type :edn, :last-write #inst ...}
-          (let [all-key-metas (<? S (k/keys store))
+          ;; Get keys to sync - either via walk-fn (reachability) or k/keys (all)
+          (let [;; If walk-fn provided, use it to discover keys; otherwise use k/keys
+                all-key-metas (if walk-fn
+                                ;; walk-fn returns just keys, we need to get metadata
+                                (let [walked-keys (<? S (walk-fn store {:sync? true}))]
+                                  (log/debug! {:id ::walk-fn-result
+                                               :msg "Walk function returned keys"
+                                               :data {:count (count walked-keys)}})
+                                  ;; Get metadata for each walked key
+                                  ;; Note: This is still more efficient than k/keys on large stores
+                                  ;; because we only fetch metadata for reachable keys
+                                  (loop [remaining (seq walked-keys)
+                                         result []]
+                                    (if-not remaining
+                                      result
+                                      (let [k (first remaining)
+                                            meta (<? S (k/get-meta store k))]
+                                        (recur (next remaining)
+                                               (if meta
+                                                 (conj result {:key k :last-write (:last-write meta)})
+                                                 result))))))
+                                ;; Default: get ALL keys via k/keys
+                                (<? S (k/keys store)))
                 ;; Filter to keys that need syncing:
                 ;; 1. Key doesn't exist on client (not in remote-key-timestamps)
                 ;; 2. Server's last-write is newer than client's
