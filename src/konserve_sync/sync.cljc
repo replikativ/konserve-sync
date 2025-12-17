@@ -113,6 +113,9 @@
        If provided, replaces k/keys for initial sync. Use this for stores with
        tree-structured data where only reachable keys should be synced (e.g., Datahike).
        Should return a core.async channel yielding a set/seq of keys to sync.
+     - :key-sort-fn (fn [key] -> comparable) - Sort keys before sending during initial sync.
+       Use this when some keys depend on others. Keys with higher sort values are sent later.
+       Example: (fn [k] (if (= k :db) 1 0)) sends :db last.
 
    Returns the store-id."
   [ctx store store-config opts]
@@ -123,7 +126,8 @@
            {:store store
             :config store-config
             :emitter emitter-state
-            :walk-fn (:walk-fn opts)})
+            :walk-fn (:walk-fn opts)
+            :key-sort-fn (:key-sort-fn opts)})
     ;; Start forwarding updates to subscribers with supervision
     (go-loop-try S [msg (<? S (emitter/get-update-ch emitter-state))]
       (when msg
@@ -215,7 +219,11 @@
                                             (pos? (compare last-write client-timestamp))))))
                                all-key-metas)
                 ;; Extract just the keys for batching
-                keys-to-send (map :key keys-to-send)
+                ;; Sort using key-sort-fn if provided - this allows callers to control
+                ;; sync order (e.g., send dependency keys before root keys)
+                key-sort-fn (:key-sort-fn store-data)
+                keys-to-send (cond->> (map :key keys-to-send)
+                               key-sort-fn (sort-by key-sort-fn))
                 batches (partition-all batch-size keys-to-send)]
 
             ;; Send each batch
