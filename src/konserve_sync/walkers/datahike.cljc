@@ -13,8 +13,10 @@
    These are optional dependencies of konserve-sync."
   (:require [konserve.core :as k]
             [me.tonsky.persistent-sorted-set.arrays :as arrays]
-            #?(:clj [superv.async :refer [go-try- <?-]]
-               :cljs [superv.async :refer-macros [go-try- <?-]]))
+            #?@(:clj [[superv.async :refer [go-try- <?-]]]
+                :cljs [[clojure.core.async :refer [<!]]]))
+  #?(:cljs (:require-macros [clojure.core.async :refer [go]]
+                            [superv.async :refer [go-try- <?-]]))
   #?(:clj (:import [me.tonsky.persistent_sorted_set PersistentSortedSet])))
 
 ;; ============================================================================
