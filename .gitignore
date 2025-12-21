@@ -36,3 +36,5 @@ Thumbs.db
 
 # REPL
 .repl-history
+.clj-kondo/
+.lsp/

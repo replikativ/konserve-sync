@@ -2,78 +2,87 @@
   "Public API for konserve-sync.
 
    konserve-sync enables real-time synchronization of konserve stores
-   across processes, machines, or between server and browser.
-
-   Uses superv.async for proper error handling and supervision.
-   Pass a supervisor when creating the context to integrate with
-   your existing supervision hierarchy.
+   across processes, machines, or between server and browser using
+   kabel.pubsub for transport.
 
    ## Quick Start
 
    Server-side (source store):
    ```clojure
    (require '[konserve-sync.core :as sync])
-   (require '[superv.async :refer [S]])
+   (require '[kabel.peer :as peer])
+   (require '[kabel.http-kit :as http-kit])
+   (require '[superv.async :refer [S <??]])
 
-   ;; Create sync context with supervisor
-   (def ctx (sync/make-context S))
+   ;; Create server peer with sync middleware
+   (def handler (http-kit/create-http-kit-handler! S \"ws://localhost:8080\" server-id))
+   (def server-peer (peer/server-peer S handler server-id
+                      (sync/server-middleware)
+                      identity))
+   (<?? S (peer/start server-peer))
 
    ;; Register store for sync
-   (sync/register-store! ctx my-store store-config)
-
-   ;; Handle new connections (transport-specific)
-   ;; When a client sends :sync/subscribe, call:
-   (sync/serve-subscription! ctx transport msg)
+   (sync/register-store! server-peer :my-store my-store
+     {:filter-fn (fn [k _] (not= k :private))})
    ```
 
    Client-side (subscriber):
    ```clojure
-   (require '[superv.async :refer [S]])
-
-   ;; Create sync context with supervisor
-   (def ctx (sync/make-context S))
+   ;; Create client peer with sync middleware
+   (def client-peer (peer/client-peer S client-id
+                      (sync/client-middleware)
+                      identity))
+   (<?? S (peer/connect S client-peer \"ws://localhost:8080\"))
 
    ;; Subscribe to remote store
-   (<! (sync/subscribe! ctx transport store-id local-store
-         {:on-error (fn [e] (log/error e))}))
-
-   ;; Register callback for specific key updates
-   (sync/register-callback! ctx store-id :my-key
-     (fn [{:keys [value]}]
-       (println \"my-key updated:\" value)))
+   (<! (sync/subscribe-store! client-peer :my-store local-store
+         {:on-key-update (fn [k v op] (println \"Updated:\" k))
+          :on-complete #(println \"Sync complete!\")}))
    ```
 
-   ## Transport Adapters
+   ## Datahike Integration
 
-   konserve-sync is transport-agnostic. Use one of the built-in adapters:
+   For Datahike stores, use the datahike walker for efficient reachability-based sync:
 
-   - `konserve-sync.transport.channels` - core.async channels (local/testing)
-   - `konserve-sync.transport.kabel` - kabel peer/middleware (production)
+   ```clojure
+   (require '[konserve-sync.walkers.datahike :as walkers])
 
-   Or implement the `PSyncTransport` protocol for custom transports."
-  (:require [konserve-sync.protocol :as proto]
-            [konserve-sync.sync :as sync]
-            [konserve-sync.receiver :as receiver]))
+   (sync/register-store! server-peer :datahike-store store
+     {:walk-fn walkers/datahike-walk-fn
+      :key-sort-fn (fn [k] (if (= k :db) 1 0))})  ; Send :db last
+   ```"
+  (:require [konserve-sync.pubsub :as pubsub]
+            [konserve-sync.transport.kabel-pubsub :as kp]))
 
 ;; =============================================================================
-;; Context Management
+;; Middleware
 ;; =============================================================================
 
-(def make-context
-  "Create a new SyncContext.
+(def server-middleware
+  "Create kabel middleware for server-side store sync.
 
-   Parameters:
-   - S: Supervisor from superv.async (required)
-   - opts: Options map (optional)
-     - :batch-size - Number of keys per batch during initial sync (default 20)
-     - :batch-timeout-ms - Timeout for batch acks in ms (default 30000)
+   Returns a middleware function for use with peer/server-peer.
 
    Example:
    ```clojure
-   (require '[superv.async :refer [S]])
-   (def ctx (make-context S {:batch-size 50}))
+   (def server-peer (peer/server-peer S handler server-id
+                      (sync/server-middleware)
+                      identity))
    ```"
-  sync/make-context)
+  kp/server-middleware)
+
+(def client-middleware
+  "Create kabel middleware for client-side store sync.
+
+   Returns a middleware function for use with peer/client-peer.
+
+   Example:
+   ```clojure
+   (def client-peer (peer/client-peer S client-id
+                      (sync/client-middleware)
+                      identity))
+   ```"
+  kp/client-middleware)
 
 ;; =============================================================================
 ;; Server-Side API
@@ -82,182 +91,119 @@
 (def register-store!
   "Register a konserve store for sync (server-side).
 
-   Sets up write-hook integration to capture changes. After registration,
-   clients can subscribe to receive updates.
+   Sets up the store as a pubsub topic with automatic write-hook
+   integration to broadcast changes to subscribers.
 
    Parameters:
-   - ctx: SyncContext from make-context
-   - store: The konserve store (must implement PWriteHookStore)
-   - store-config: Configuration used to create the store
+   - peer: The kabel server peer atom
+   - topic: Topic identifier (keyword or any EDN value)
+   - store: The konserve store (source of truth)
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
+     - :walk-fn (fn [store opts] -> channel) - Custom key discovery function
+       (e.g., datahike-walk-fn for reachability-based sync)
+     - :key-sort-fn (fn [key] -> comparable) - Sort keys for sync order
+     - :batch-size - Items per batch during handshake (default 20)
 
-   Returns the store-id (UUID).
+   Returns the topic.
 
    Example:
    ```clojure
-   (def store-id (register-store! ctx my-store
-                   {:backend :file :path \"/data/store\"}
-                   {:filter-fn (fn [k _] (not= k :private))}))
+   (sync/register-store! server-peer :my-store my-store
+     {:filter-fn (fn [k _] (not= k :private))
+      :batch-size 50})
    ```"
-  sync/register-store!)
+  kp/register-store!)
 
 (def unregister-store!
-  "Unregister a store from sync.
+  "Unregister a store from sync (server-side).
 
-   Removes write-hook and cleans up resources. Existing subscribers
-   will stop receiving updates."
-  sync/unregister-store!)
+   Removes write-hooks and unregisters the pubsub topic.
+   Existing subscribers will stop receiving updates."
+  kp/unregister-store!)
 
-(def serve-subscription!
-  "Handle a subscription request from a client (server-side).
+(def get-subscribers
+  "Get all transports subscribed to a store topic (server-side)."
+  kp/get-subscribers)
 
-   Call this when you receive a :sync/subscribe message from a client.
-
-   Parameters:
-   - ctx: SyncContext
-   - transport: The client's transport (PSyncTransport)
-   - msg: The :sync/subscribe message
-
-   Returns a channel that yields:
-   - {:ok true} when subscription is established
-   - {:error ex} on failure
-
-   Example (in transport message handler):
-   ```clojure
-   (when (= :sync/subscribe (:type msg))
-     (serve-subscription! ctx client-transport msg))
-   ```"
-  sync/serve-subscription!)
-
-(def remove-subscriber!
-  "Remove a subscriber from a store (server-side).
-
-   Call this when a client disconnects to clean up state.
-
-   Parameters:
-   - ctx: SyncContext
-   - store-id: UUID of the store
-   - transport: The client's transport"
-  sync/remove-subscriber!)
+(def topic-registered?
+  "Check if a topic is registered (server-side)."
+  kp/topic-registered?)
 
 ;; =============================================================================
 ;; Client-Side API
 ;; =============================================================================
 
-(def subscribe!
-  "Subscribe to a remote store (client-side).
+(def subscribe-store!
+  "Subscribe to a remote store and sync to a local store (client-side).
 
    Initiates connection to a remote store and syncs data to a local store.
-   Initial sync sends all keys the local store doesn't have, then streams
-   incremental updates.
+   Uses timestamp-based differential sync - only keys where server's
+   timestamp is newer than client's are transferred.
 
    Parameters:
-   - ctx: SyncContext
-   - transport: Transport to the server (PSyncTransport)
-   - store-id: UUID of the store to subscribe to
+   - peer: The kabel client peer atom
+   - topic: The topic/store-id to subscribe to
    - local-store: Local konserve store to sync data into
    - opts: Options map
-     - :on-error (fn [{:keys [error msg]}]) - Error handler (required)
+     - :on-key-update (fn [key value operation]) - Called after each update
+       operation is :handshake, :assoc, or :dissoc
      - :on-complete (fn []) - Called when initial sync completes
 
    Returns a channel that yields:
    - {:ok true} when subscription and initial sync complete
-   - {:error ex} on failure
+   - {:error ...} on failure
 
    Example:
    ```clojure
    (go
-     (let [result (<! (subscribe! ctx transport store-id local-store
-                        {:on-error #(log/error \"Sync error\" %)
-                         :on-complete #(log/info \"Sync complete!\")}))]
+     (let [result (<! (sync/subscribe-store! client-peer :my-store local-store
+                        {:on-key-update (fn [k v op] (println \"Update:\" k op))
+                         :on-complete #(println \"Sync complete!\")}))]
        (if (:ok result)
-         (log/info \"Subscribed successfully\")
-         (log/error \"Subscription failed\" (:error result)))))
+         (println \"Subscribed!\")
+         (println \"Error:\" (:error result)))))
    ```"
-  sync/subscribe!)
+  kp/subscribe-store!)
 
-(def unsubscribe!
-  "Unsubscribe from a remote store (client-side).
+(def unsubscribe-store!
+  "Unsubscribe from a store (client-side).
 
-   Stops receiving updates and cleans up resources."
-  sync/unsubscribe!)
-
-(def register-callback!
-  "Register a callback for updates to a specific key.
-
-   Must be called after subscribe! has completed.
+   Stops receiving updates from the remote store.
 
    Parameters:
-   - ctx: SyncContext
-   - store-id: UUID of the subscribed store
-   - key: The key to watch
-   - callback: (fn [{:keys [store-id key value operation]}])
+   - peer: The kabel client peer atom
+   - topic: The topic/store-id to unsubscribe from
 
-   Returns a function to unregister the callback.
-
-   Example:
-   ```clojure
-   (let [unregister (register-callback! ctx store-id :users
-                      (fn [{:keys [value]}]
-                        (render-users value)))]
-     ;; Later, to stop watching:
-     (unregister))
-   ```"
-  sync/register-callback!)
+   Returns a channel that yields {:ok true}."
+  kp/unsubscribe-store!)
 
 ;; =============================================================================
-;; Utility Functions
+;; Strategy Constructors (Advanced Use)
 ;; =============================================================================
 
-(def store-id
-  "Compute store-id from configuration.
+(def store-sync-strategy
+  "Create a StoreSyncStrategy for client-side use.
 
-   If config contains :sync/id, uses that directly.
-   Otherwise, hashes the config to produce a stable UUID.
+   For advanced use cases where you need direct access to the strategy.
+   Most users should use subscribe-store! instead.
 
-   Use :sync/id for stable IDs across config changes:
-   ```clojure
-   {:sync/id #uuid \"12345678-...\"
-    :backend :file
-    :path \"/data/store\"}
-   ```"
-  proto/store-id)
+   Parameters:
+   - store: Local konserve store to sync into
+   - opts: Options map
+     - :on-key-update (fn [key value operation]) - Called after each update"
+  pubsub/store-sync-strategy)
 
-(def get-store
-  "Get a registered store by ID (server-side)."
-  sync/get-store)
+(def server-store-strategy
+  "Create a StoreSyncStrategy for server-side use.
 
-(def get-store-ids
-  "Get all registered store IDs (server-side)."
-  sync/get-store-ids)
+   For advanced use cases where you need direct access to the strategy.
+   Most users should use register-store! instead.
 
-(def get-subscribers
-  "Get all transports subscribed to a store (server-side)."
-  sync/get-subscribers)
-
-;; =============================================================================
-;; Message Validation
-;; =============================================================================
-
-(def valid-msg?
-  "Check if a message is a valid sync protocol message.
-
-   Useful for filtering/validating incoming messages."
-  proto/valid-msg?)
-
-(def subscribe-msg?
-  "Check if a message is a :sync/subscribe request."
-  proto/subscribe-msg?)
-
-(def update-msg?
-  "Check if a message is a :sync/update."
-  proto/update-msg?)
-
-(def control-msg?
-  "Check if a message is a control message (not data).
-
-   Control messages: subscribe, subscribe-ack, subscribe-error,
-   batch-complete, batch-ack, complete"
-  proto/control-msg?)
-
+   Parameters:
+   - store: Server konserve store (source of truth)
+   - opts: Options map
+     - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
+     - :walk-fn (fn [store opts] -> channel) - Custom key discovery
+     - :key-sort-fn (fn [key] -> comparable) - Sort keys for sync order"
+  pubsub/server-store-strategy)

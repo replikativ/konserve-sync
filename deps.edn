@@ -6,19 +6,17 @@
                           :git/sha "4d44dfe2e1955933e564c9f4c815b5bb3c33d6dd"}
   io.replikativ/hasch {:mvn/version "0.3.94"}
   io.replikativ/superv.async {:mvn/version "0.3.48"}
-  com.taoensso/trove {:mvn/version "1.1.0"}}
+  com.taoensso/trove {:mvn/version "1.1.0"}
+  ;; Use local kabel with kabel.pubsub support
+  io.replikativ/kabel {:local/root "../kabel"}}
 
  :aliases
  {:dev
-  {:extra-paths ["test"]
-   :extra-deps {io.replikativ/kabel {:git/url "https://github.com/replikativ/kabel" 
-                                     :git/sha "69f47ce3d97b6e3d29c8c458ff1d665fce6a860f"}}}
+  {:extra-paths ["test"]}
 
   :test
   {:extra-paths ["test"]
-   :extra-deps {io.replikativ/kabel {:git/url "https://github.com/replikativ/kabel"
-                                     :git/sha "69f47ce3d97b6e3d29c8c458ff1d665fce6a860f"}
-                lambdaisland/kaocha {:mvn/version "1.91.1392"}
+   :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
                 ;; Optional dep for datahike walker tests (includes persistent-sorted-set)
                 io.replikativ/datahike {:mvn/version "0.6.1610"}}
    :main-opts ["-m" "kaocha.runner"]}

@@ -52,15 +52,32 @@
                   (<?- (walk-node-async store child collected))))
               (recur (inc i)))))))))
 
+(defn- get-btset-address
+  "Extract root address from a BTSet or deferred index format.
+   Handles both actual PersistentSortedSet/BTSet instances AND
+   deferred format maps {:deferred-type :persistent-sorted-set :address ...}
+   returned by Fressian handlers."
+  [btset]
+  (cond
+    ;; Deferred format from Fressian deserialization
+    (and (map? btset) (= (:deferred-type btset) :persistent-sorted-set))
+    (:address btset)
+
+    ;; Actual PersistentSortedSet (CLJ) or BTSet (CLJS)
+    #?(:clj (instance? PersistentSortedSet btset)
+       :cljs true)
+    #?(:clj (.-_address ^PersistentSortedSet btset)
+       :cljs (.-address btset))
+
+    :else nil))
+
 (defn- collect-btset-addresses-async
   "Collect all addresses from a BTSet by walking the tree.
    Fetches nodes from the store to discover all nested addresses."
   [store btset]
   (go-try-
     (let [collected (atom #{})
-          root-addr #?(:clj (when (instance? PersistentSortedSet btset)
-                              (.-_address ^PersistentSortedSet btset))
-                       :cljs (.-address btset))]
+          root-addr (get-btset-address btset)]
       (when root-addr
         (swap! collected conj root-addr)
         ;; Fetch root node and walk its children
