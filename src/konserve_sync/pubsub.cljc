@@ -42,9 +42,9 @@
 ;; =============================================================================
 
 (defrecord StoreSyncStrategy
-  [store        ; The konserve store (local on client, source on server)
-   opts         ; {:filter-fn, :walk-fn, :key-sort-fn, :on-key-update}
-   role])       ; :server or :client
+           [store        ; The konserve store (local on client, source on server)
+            opts         ; {:filter-fn, :walk-fn, :key-sort-fn, :on-key-update}
+            role])       ; :server or :client
 
 (defn- get-local-key-timestamps
   "Get {key -> last-write} map from a konserve store.
@@ -86,12 +86,12 @@
 
           ;; Filter to keys that need syncing
           keys-to-send (filter
-                         (fn [{:keys [key last-write]}]
-                           (let [client-timestamp (get client-timestamps key)]
-                             (and (filter-fn key nil)
-                                  (or (nil? client-timestamp)
-                                      (pos? (compare last-write client-timestamp))))))
-                         all-key-metas)
+                        (fn [{:keys [key last-write]}]
+                          (let [client-timestamp (get client-timestamps key)]
+                            (and (filter-fn key nil)
+                                 (or (nil? client-timestamp)
+                                     (pos? (compare last-write client-timestamp))))))
+                        all-key-metas)
 
           ;; Sort if key-sort-fn provided
           sorted-keys (cond->> (map :key keys-to-send)

@@ -2,13 +2,11 @@
 
  :deps
  {org.clojure/clojure {:mvn/version "1.11.1"}
-  io.replikativ/konserve {:git/url "https://github.com/replikativ/konserve"
-                          :git/sha "4d44dfe2e1955933e564c9f4c815b5bb3c33d6dd"}
+  io.replikativ/konserve {:mvn/version "0.8.328"}
   io.replikativ/hasch {:mvn/version "0.3.94"}
   io.replikativ/superv.async {:mvn/version "0.3.48"}
   com.taoensso/trove {:mvn/version "1.1.0"}
-  ;; Use local kabel with kabel.pubsub support
-  io.replikativ/kabel {:local/root "../kabel"}}
+  io.replikativ/kabel {:mvn/version "0.3.91"}}
 
  :aliases
  {:dev
@@ -23,4 +21,17 @@
 
   :cljs-test
   {:extra-paths ["test"]
-   :extra-deps {thheller/shadow-cljs {:mvn/version "2.26.0"}}}}}
+   :extra-deps {thheller/shadow-cljs {:mvn/version "2.26.0"}}}
+
+  :build
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+          slipset/deps-deploy {:mvn/version "0.2.2"}}
+   :ns-default build}
+
+  :format
+  {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
+   :main-opts ["-m" "cljfmt.main" "check"]}
+
+  :ffix
+  {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
+   :main-opts ["-m" "cljfmt.main" "fix"]}}}

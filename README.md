@@ -1,5 +1,12 @@
 # konserve-sync
 
+<p align="center">
+<a href="https://clojurians.slack.com/archives/CB7GJAN0L"><img src="https://badgen.net/badge/-/slack?icon=slack&label"/></a>
+<a href="https://clojars.org/io.replikativ/konserve-sync"><img src="https://img.shields.io/clojars/v/io.replikativ/konserve-sync.svg"/></a>
+<a href="https://circleci.com/gh/replikativ/konserve-sync"><img src="https://circleci.com/gh/replikativ/konserve-sync.svg?style=shield"/></a>
+<a href="https://github.com/replikativ/konserve-sync/tree/main"><img src="https://img.shields.io/github/last-commit/replikativ/konserve-sync/main"/></a>
+</p>
+
 A synchronization layer for [konserve](https://github.com/replikativ/konserve) key-value stores. Enables real-time replication from a primary store to multiple subscribers over pluggable transports.
 
 ## Features
@@ -12,9 +19,11 @@ A synchronization layer for [konserve](https://github.com/replikativ/konserve) k
 
 ## Installation
 
+[![Clojars Project](http://clojars.org/io.replikativ/konserve-sync/latest-version.svg)](http://clojars.org/io.replikativ/konserve-sync)
+
 ```clojure
-{:deps {io.replikativ/konserve-sync {:git/url "https://github.com/replikativ/konserve-sync"
-                                      :git/sha "..."}}}
+;; deps.edn
+{:deps {io.replikativ/konserve-sync {:mvn/version "LATEST"}}}
 ```
 
 ## Quick Start

@@ -137,7 +137,7 @@
       (<?? S (k/assoc store :public-2 "pub2"))
 
       (let [strategy (ks-pubsub/server-store-strategy store
-                                                       {:filter-fn (fn [k _]
+                                                      {:filter-fn (fn [k _]
                                                                     (clojure.string/starts-with?
                                                                      (name k) "public"))})
             items-ch (proto/-handshake-items strategy {})
@@ -253,8 +253,8 @@
       ;; Register with filter
       (kp/register-store! *server-peer* :filtered-store *server-store*
                           {:filter-fn (fn [k _]
-                                       (not (clojure.string/starts-with?
-                                             (name k) "_")))})
+                                        (not (clojure.string/starts-with?
+                                              (name k) "_")))})
 
       (<?? S (kp/subscribe-store! *client-peer* :filtered-store *client-store* {}))
       (<?? S (timeout 800))

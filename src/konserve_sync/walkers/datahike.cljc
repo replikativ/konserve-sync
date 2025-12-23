@@ -39,18 +39,18 @@
    Fetches each node from the store to discover its children's addresses."
   [store node collected]
   (go-try-
-    (when node
+   (when node
       ;; Branch nodes have addresses array pointing to children
-      (when-let [addresses (get-node-addresses node)]
-        (when (pos? (arrays/alength addresses))
-          (loop [i 0]
-            (when (< i (arrays/alength addresses))
-              (when-let [addr (arrays/aget addresses i)]
-                (swap! collected conj addr)
+     (when-let [addresses (get-node-addresses node)]
+       (when (pos? (arrays/alength addresses))
+         (loop [i 0]
+           (when (< i (arrays/alength addresses))
+             (when-let [addr (arrays/aget addresses i)]
+               (swap! collected conj addr)
                 ;; Recursively walk child node
-                (let [child (<?- (k/get store addr))]
-                  (<?- (walk-node-async store child collected))))
-              (recur (inc i)))))))))
+               (let [child (<?- (k/get store addr))]
+                 (<?- (walk-node-async store child collected))))
+             (recur (inc i)))))))))
 
 (defn- get-btset-address
   "Extract root address from a BTSet or deferred index format.
@@ -76,15 +76,14 @@
    Fetches nodes from the store to discover all nested addresses."
   [store btset]
   (go-try-
-    (let [collected (atom #{})
-          root-addr (get-btset-address btset)]
-      (when root-addr
-        (swap! collected conj root-addr)
+   (let [collected (atom #{})
+         root-addr (get-btset-address btset)]
+     (when root-addr
+       (swap! collected conj root-addr)
         ;; Fetch root node and walk its children
-        (let [root-node (<?- (k/get store root-addr))]
-          (<?- (walk-node-async store root-node collected))))
-      @collected)))
-
+       (let [root-node (<?- (k/get store root-addr))]
+         (<?- (walk-node-async store root-node collected))))
+     @collected)))
 
 ;; ============================================================================
 ;; Main Walker Function
@@ -117,29 +116,29 @@
        opts)"
   [store _opts]
   (go-try-
-    (let [stored-db (<?- (k/get store :db))
-          collected (atom #{:db})]
-      (when stored-db
+   (let [stored-db (<?- (k/get store :db))
+         collected (atom #{:db})]
+     (when stored-db
         ;; Walk main indices - must fetch nodes from store to find all addresses
-        (loop [idx-keys [:eavt-key :aevt-key :avet-key]]
-          (when (seq idx-keys)
-            (let [idx-key (first idx-keys)]
-              (when-let [btset (get stored-db idx-key)]
-                (let [addrs (<?- (collect-btset-addresses-async store btset))]
-                  (swap! collected into addrs)))
-              (recur (rest idx-keys)))))
+       (loop [idx-keys [:eavt-key :aevt-key :avet-key]]
+         (when (seq idx-keys)
+           (let [idx-key (first idx-keys)]
+             (when-let [btset (get stored-db idx-key)]
+               (let [addrs (<?- (collect-btset-addresses-async store btset))]
+                 (swap! collected into addrs)))
+             (recur (rest idx-keys)))))
         ;; Walk temporal indices
-        (loop [idx-keys [:temporal-eavt-key :temporal-aevt-key :temporal-avet-key]]
-          (when (seq idx-keys)
-            (let [idx-key (first idx-keys)]
-              (when-let [btset (get stored-db idx-key)]
-                (let [addrs (<?- (collect-btset-addresses-async store btset))]
-                  (swap! collected into addrs)))
-              (recur (rest idx-keys)))))
+       (loop [idx-keys [:temporal-eavt-key :temporal-aevt-key :temporal-avet-key]]
+         (when (seq idx-keys)
+           (let [idx-key (first idx-keys)]
+             (when-let [btset (get stored-db idx-key)]
+               (let [addrs (<?- (collect-btset-addresses-async store btset))]
+                 (swap! collected into addrs)))
+             (recur (rest idx-keys)))))
         ;; Include schema-meta-key
-        (when-let [schema-key (get stored-db :schema-meta-key)]
-          (swap! collected conj schema-key)))
-      @collected)))
+       (when-let [schema-key (get stored-db :schema-meta-key)]
+         (swap! collected conj schema-key)))
+     @collected)))
 
 ;; ============================================================================
 ;; Convenience wrapper for tiered store walk-sync
