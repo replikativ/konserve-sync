@@ -2,7 +2,7 @@
   (:require [clojure.tools.build.api :as b]
             [deps-deploy.deps-deploy :as dd]))
 
-(def lib 'io.replikativ/konserve-sync)
+(def lib 'org.replikativ/konserve-sync)
 (def major 0)
 (def minor 1)
 (defn commit-count [] (b/git-count-revs nil))
