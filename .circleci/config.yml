@@ -75,6 +75,15 @@ jobs:
           name: Deploy to Clojars
           command: clojure -T:build deploy
 
+  release:
+    executor: tools/clojurecli
+    steps:
+      - attach_workspace:
+          at: /home/circleci
+      - run:
+          name: Create GitHub release
+          command: clojure -T:build release
+
 workflows:
   build-test-deploy:
     jobs:
@@ -103,3 +112,12 @@ workflows:
             - format-check
             - test-clj
             - build
+      - release:
+          context:
+            - dockerhub-deploy
+            - github-token
+          filters:
+            branches:
+              only: main
+          requires:
+            - deploy

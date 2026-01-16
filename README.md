@@ -2,7 +2,7 @@
 
 <p align="center">
 <a href="https://clojurians.slack.com/archives/CB7GJAN0L"><img src="https://badgen.net/badge/-/slack?icon=slack&label"/></a>
-<a href="https://clojars.org/io.replikativ/konserve-sync"><img src="https://img.shields.io/clojars/v/io.replikativ/konserve-sync.svg"/></a>
+<a href="https://clojars.org/org.replikativ/konserve-sync"><img src="https://img.shields.io/clojars/v/org.replikativ/konserve-sync.svg"/></a>
 <a href="https://circleci.com/gh/replikativ/konserve-sync"><img src="https://circleci.com/gh/replikativ/konserve-sync.svg?style=shield"/></a>
 <a href="https://github.com/replikativ/konserve-sync/tree/main"><img src="https://img.shields.io/github/last-commit/replikativ/konserve-sync/main"/></a>
 </p>
@@ -19,11 +19,11 @@ A synchronization layer for [konserve](https://github.com/replikativ/konserve) k
 
 ## Installation
 
-[![Clojars Project](http://clojars.org/io.replikativ/konserve-sync/latest-version.svg)](http://clojars.org/io.replikativ/konserve-sync)
+[![Clojars Project](http://clojars.org/org.replikativ/konserve-sync/latest-version.svg)](http://clojars.org/org.replikativ/konserve-sync)
 
 ```clojure
 ;; deps.edn
-{:deps {io.replikativ/konserve-sync {:mvn/version "LATEST"}}}
+{:deps {org.replikativ/konserve-sync {:mvn/version "LATEST"}}}
 ```
 
 ## Quick Start
