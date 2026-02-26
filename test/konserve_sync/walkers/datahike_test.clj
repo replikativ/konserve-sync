@@ -42,6 +42,7 @@
 (deftest test-datahike-walk-fn-basic
   (testing "walker discovers all BTSet addresses from datahike store"
     (let [cfg {:store {:backend :file
+                       :id (java.util.UUID/randomUUID)
                        :path test-dir}
                :schema-flexibility :write
                :keep-history? false}
@@ -74,6 +75,7 @@
 (deftest test-datahike-walk-fn-with-history
   (testing "walker discovers temporal index addresses when keep-history? is true"
     (let [cfg {:store {:backend :file
+                       :id (java.util.UUID/randomUUID)
                        :path test-dir}
                :schema-flexibility :write
                :keep-history? true}
@@ -96,6 +98,7 @@
 (deftest test-make-tiered-walk-fn
   (testing "make-tiered-walk-fn creates proper wrapper"
     (let [cfg {:store {:backend :file
+                       :id (java.util.UUID/randomUUID)
                        :path test-dir}
                :schema-flexibility :write
                :keep-history? false}
