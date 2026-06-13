@@ -4,7 +4,8 @@
             [clojure.core.async :refer [<!!]]
             [datahike.api :as d]
             [konserve.core :as k]
-            [konserve-sync.walkers.datahike :as walker]))
+            [konserve-sync.walkers.datahike :as walker]
+            [clojure.set]))
 
 ;; =============================================================================
 ;; Test Fixtures
@@ -118,3 +119,46 @@
       (is (pos? (count (filter uuid? reachable-keys))))
 
       (d/release conn))))
+
+;; =============================================================================
+;; Fork / multi-branch reachability + sync-order (the "reflect a fork" keystone)
+;; =============================================================================
+
+(deftest test-walk-includes-fork-branch
+  (testing "walker reaches a FORK branch's head + blocks (not just trunk :db),
+            and content keys sort before mutable branch pointers"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? true        ; branching needs history
+               :branch-history? true}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data [{:name "Trunk" :age 1}]})
+          _ (d/branch! conn :db :fork)
+          fork-conn (d/connect (assoc cfg :branch :fork))
+          _ (d/transact fork-conn {:tx-data [{:name "ForkOnly" :age 99}]})
+          store (-> conn d/db :store)
+          reachable (<!! (walker/datahike-walk-fn store {}))]
+
+      (testing "the fork head pointer IS reached (the bug this fixes)"
+        (is (contains? reachable :fork)
+            "fork branch HEAD key must be walked so it propagates to subscribers")
+        (is (contains? reachable :branches))
+        (is (contains? (<!! (k/get store :branches)) :fork)))
+
+      (testing "fork's content blocks are reachable (so branch-as-db works remotely)"
+        (let [fork-db     (<!! (k/get store :fork))
+              fork-blocks (<!! (#'walker/walk-stored-db-async store fork-db))]
+          (is (seq fork-blocks))
+          (is (clojure.set/subset? fork-blocks reachable)
+              "every reachable block of the fork must be in the walk set")))
+
+      (testing "key-sort invariant: content (uuid) keys precede mutable pointers (keywords)"
+        (let [key-sort-fn   (fn [k] (if (keyword? k) 1 0))
+              sorted        (sort-by key-sort-fn reachable)
+              last-uuid-idx (->> sorted (keep-indexed (fn [i k] (when-not (keyword? k) i))) last)
+              first-kw-idx  (->> sorted (keep-indexed (fn [i k] (when (keyword? k) i))) first)]
+          (when (and last-uuid-idx first-kw-idx)
+            (is (< last-uuid-idx first-kw-idx)
+                "every content block sorts before every branch-pointer keyword")))))))

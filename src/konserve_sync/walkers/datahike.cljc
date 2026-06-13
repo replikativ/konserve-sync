@@ -89,9 +89,33 @@
 ;; Main Walker Function
 ;; ============================================================================
 
+(defn- walk-stored-db-async
+  "Collect all BTSet node addresses reachable from a single stored-db value.
+   Returns a channel that delivers a set of konserve keys (BTSet addresses
+   + the schema-meta key, if any). Used by `datahike-walk-fn` to traverse
+   one branch at a time."
+  [store stored-db]
+  (go-try-
+   (let [collected (atom #{})]
+     (when stored-db
+       ;; Main indices
+       (doseq [idx-key [:eavt-key :aevt-key :avet-key]]
+         (when-let [btset (get stored-db idx-key)]
+           (let [addrs (<?- (collect-btset-addresses-async store btset))]
+             (swap! collected into addrs))))
+       ;; Temporal indices (when :keep-history?)
+       (doseq [idx-key [:temporal-eavt-key :temporal-aevt-key :temporal-avet-key]]
+         (when-let [btset (get stored-db idx-key)]
+           (let [addrs (<?- (collect-btset-addresses-async store btset))]
+             (swap! collected into addrs))))
+       ;; Schema meta
+       (when-let [schema-key (get stored-db :schema-meta-key)]
+         (swap! collected conj schema-key)))
+     @collected)))
+
 (defn datahike-walk-fn
-  "Walker function for konserve-sync that discovers all BTSet node addresses
-   reachable from the :db root in a Datahike store.
+  "Walker function for konserve-sync that discovers all keys reachable
+   from every branch in a Datahike store.
 
    Arguments:
    - store: The konserve store containing Datahike data
@@ -101,10 +125,20 @@
    - Channel yielding set of reachable keys
 
    The returned set includes:
-   - :db (the stored database root)
-   - All BTSet node addresses from eavt/aevt/avet indices
-   - All BTSet node addresses from temporal indices (if keep-history?)
-   - :schema-meta-key (stores schema data needed for queries)
+   - `:branches` (the set of branch names)
+   - Every branch HEAD key (e.g. `:db`, `:db-foo`, `:db-bar` …) read from
+     `:branches` and falling back to `:db` if the set is missing.
+   - All BTSet node addresses reachable from each branch's
+     eavt/aevt/avet indices (live + temporal).
+   - Every branch's `:schema-meta-key`.
+
+   Earlier versions walked only the `:db` (trunk) root, which meant
+   non-trunk branches' HEADs never propagated to subscribed peers.
+   Clients could call `(d/branches conn)` (because the `:branches` set
+   itself was published through the write-hook on subsequent server
+   writes) but `(d/branch-as-db conn :db-foo)` returned nil because the
+   actual HEAD entry at key `:db-foo` was missing locally. Walking
+   every branch on initial sync closes that gap.
 
    Usage with register-store!:
      (sync/register-store! ctx store config {:walk-fn datahike-walk-fn})
@@ -116,28 +150,19 @@
        opts)"
   [store _opts]
   (go-try-
-   (let [stored-db (<?- (k/get store :db))
-         collected (atom #{:db})]
-     (when stored-db
-        ;; Walk main indices - must fetch nodes from store to find all addresses
-       (loop [idx-keys [:eavt-key :aevt-key :avet-key]]
-         (when (seq idx-keys)
-           (let [idx-key (first idx-keys)]
-             (when-let [btset (get stored-db idx-key)]
-               (let [addrs (<?- (collect-btset-addresses-async store btset))]
-                 (swap! collected into addrs)))
-             (recur (rest idx-keys)))))
-        ;; Walk temporal indices
-       (loop [idx-keys [:temporal-eavt-key :temporal-aevt-key :temporal-avet-key]]
-         (when (seq idx-keys)
-           (let [idx-key (first idx-keys)]
-             (when-let [btset (get stored-db idx-key)]
-               (let [addrs (<?- (collect-btset-addresses-async store btset))]
-                 (swap! collected into addrs)))
-             (recur (rest idx-keys)))))
-        ;; Include schema-meta-key
-       (when-let [schema-key (get stored-db :schema-meta-key)]
-         (swap! collected conj schema-key)))
+   (let [;; Read the branch set, falling back to {:db} if absent so a
+         ;; fresh store still walks trunk before `:branches` has ever
+         ;; been initialized.
+         branches (or (<?- (k/get store :branches))
+                      #{:db})
+         collected (atom (conj (set branches) :branches))]
+     (loop [bs (seq branches)]
+       (when bs
+         (let [branch-key (first bs)]
+           (when-let [stored-db (<?- (k/get store branch-key))]
+             (let [addrs (<?- (walk-stored-db-async store stored-db))]
+               (swap! collected into addrs)))
+           (recur (next bs)))))
      @collected)))
 
 ;; ============================================================================
