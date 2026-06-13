@@ -33,6 +33,31 @@
                             [superv.async :refer [go-try- <?-]])))
 
 ;; ============================================================================
+;; Fetch-gate ordering + register bundle
+;; ============================================================================
+
+(defn keyword-last
+  "`:key-sort-fn` for registering a registry store: content-addressed (uuid)
+   PSS node blocks publish FIRST, the mutable pointer keys (`:registry/roots`,
+   `:registry/freed`) LAST. So a subscriber's `on-key-update` for `:registry/roots`
+   means \"the whole tree at that root is already local\" — the per-store
+   fetch-gate, identical in spirit to the datahike branch-pointer gate."
+  [k]
+  (if (keyword? k) 1 0))
+
+(declare registry-walk-fn)
+
+(defn registry-sync-opts
+  "Options bundle for `register-store!` / `subscribe-store!` on a yggdrasil
+   registry store: the reachability walker + the fetch-gate ordering. Merge in
+   `:on-key-update` / `:on-complete` as needed:
+
+     (register-store! peer topic (:kv-store registry) (registry-sync-opts))"
+  []
+  {:walk-fn registry-walk-fn
+   :key-sort-fn keyword-last})
+
+;; ============================================================================
 ;; Reachability walk (for sync)
 ;; ============================================================================
 

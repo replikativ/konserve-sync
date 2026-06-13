@@ -71,6 +71,23 @@
       (is (= (count entries) (count read-entries)))
       (is (= (set entries) (set read-entries))))))
 
+(deftest test-keyword-last-fetch-gate
+  (testing "content (uuid) node blocks sort before the mutable pointer keywords,
+            so the pointer's on-key-update means the tree is fully synced"
+    (let [{:keys [store]} (build-registry-store!)
+          reachable (<!! (reg/registry-walk-fn store {}))
+          sorted (sort-by reg/keyword-last reachable)
+          last-uuid-idx (->> sorted (keep-indexed (fn [i k] (when-not (keyword? k) i))) last)
+          first-kw-idx (->> sorted (keep-indexed (fn [i k] (when (keyword? k) i))) first)]
+      (is (= 1 (reg/keyword-last :registry/roots)))
+      (is (= 0 (reg/keyword-last (random-uuid))))
+      (when (and last-uuid-idx first-kw-idx)
+        (is (< last-uuid-idx first-kw-idx)
+            "every content block sorts before every registry pointer keyword"))
+      (testing "registry-sync-opts bundles the walker + the gate ordering"
+        (is (= reg/registry-walk-fn (:walk-fn (reg/registry-sync-opts))))
+        (is (= reg/keyword-last (:key-sort-fn (reg/registry-sync-opts))))))))
+
 (deftest test-latest-by-system-branch
   (testing "projection keeps the greatest-HLC entry per [system branch]"
     (let [{:keys [store]} (build-registry-store!)
