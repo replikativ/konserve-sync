@@ -27,25 +27,27 @@
    - Client: pass `registry-walk-fn` to the client's walk-sync; project the
      control-plane target with `read-registry-entries` / `latest-by-system-branch`."
   (:require [konserve.core :as k]
+            [konserve-sync.walkers.pss :as pss]
             #?@(:clj [[superv.async :refer [go-try- <?-]]]
                 :cljs [[clojure.core.async :refer [<!]]]))
   #?(:cljs (:require-macros [clojure.core.async :refer [go]]
                             [superv.async :refer [go-try- <?-]])))
 
 ;; ============================================================================
-;; Fetch-gate ordering + register bundle
+;; Fetch-gate ordering + register bundle — the registry is one instance of the
+;; generic content-addressed-PSS-store walker (konserve-sync.walkers.pss).
 ;; ============================================================================
 
-(defn keyword-last
-  "`:key-sort-fn` for registering a registry store: content-addressed (uuid)
-   PSS node blocks publish FIRST, the mutable pointer keys (`:registry/roots`,
-   `:registry/freed`) LAST. So a subscriber's `on-key-update` for `:registry/roots`
-   means \"the whole tree at that root is already local\" — the per-store
-   fetch-gate, identical in spirit to the datahike branch-pointer gate."
-  [k]
-  (if (keyword? k) 1 0))
+(def keyword-last
+  "Re-export of the generic PSS fetch-gate (content blocks first, mutable
+   keyword pointers last)."
+  pss/keyword-last)
 
-(declare registry-walk-fn)
+(def registry-walk-fn
+  "Walker for a yggdrasil registry store: every PSS node reachable from
+   `:registry/roots` (a `{:tsbs <root>}` cell) plus the well-known pointers
+   `:registry/roots` / `:registry/freed`. Orphan blocks are pruned."
+  (pss/make-pss-walk-fn :registry/roots #{:registry/roots :registry/freed}))
 
 (defn registry-sync-opts
   "Options bundle for `register-store!` / `subscribe-store!` on a yggdrasil
@@ -56,47 +58,6 @@
   []
   {:walk-fn registry-walk-fn
    :key-sort-fn keyword-last})
-
-;; ============================================================================
-;; Reachability walk (for sync)
-;; ============================================================================
-
-(defn- walk-pss-node-async
-  "Depth-first walk from `addr`, adding every reachable node address to the
-   `collected` atom. Idempotent — guards against re-visiting a shared block."
-  [store addr collected]
-  (go-try-
-   (when (and addr (not (contains? @collected addr)))
-     (swap! collected conj addr)
-     (let [node (<?- (k/get store addr))]
-       (when-let [addresses (:addresses node)]
-         (loop [as (seq addresses)]
-           (when as
-             (<?- (walk-pss-node-async store (first as) collected))
-             (recur (next as)))))))))
-
-(defn registry-walk-fn
-  "Walker for konserve-sync that discovers every key reachable in a yggdrasil
-   registry store.
-
-   Returns a channel yielding the set of reachable keys:
-   - `:registry/roots` and `:registry/freed` (the well-known pointers)
-   - the root node address(es) read from `:registry/roots`
-   - every PSS node address reachable from each root via `:addresses`.
-
-   Arguments:
-   - store: the konserve store holding the registry
-   - opts:  unused, kept for walk-fn API compatibility."
-  [store _opts]
-  (go-try-
-   (let [collected (atom #{:registry/roots :registry/freed})
-         roots (<?- (k/get store :registry/roots))]
-     ;; roots is e.g. {:tsbs <root-address>}; tolerate extra index roots.
-     (loop [rs (seq (vals roots))]
-       (when rs
-         (<?- (walk-pss-node-async store (first rs) collected))
-         (recur (next rs))))
-     @collected)))
 
 ;; ============================================================================
 ;; Entry read-out (for control-plane projection)
