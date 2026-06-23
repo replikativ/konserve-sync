@@ -2,7 +2,9 @@
 
  :deps
  {org.clojure/clojure {:mvn/version "1.11.1"}
-  org.replikativ/konserve {:mvn/version "0.9.342"}
+  ;; TEMPORARY: local konserve for the per-write metadata channel (write-hook
+  ;; carries :meta → immutable-skip echo fix). Revert to mvn once released. (PR #144)
+  org.replikativ/konserve {:local/root "../konserve"}
   org.replikativ/hasch {:mvn/version "0.3.96"}
   org.replikativ/superv.async {:mvn/version "0.3.50"}
   com.taoensso/trove {:mvn/version "1.1.0"}
