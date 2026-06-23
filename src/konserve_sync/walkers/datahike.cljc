@@ -114,47 +114,64 @@
      @collected)))
 
 (defn datahike-walk-fn
-  "Walker function for konserve-sync that discovers all keys reachable
-   from every branch in a Datahike store.
+  "Walker function for konserve-sync that discovers the keys reachable from a
+   Datahike store's branches.
 
    Arguments:
    - store: The konserve store containing Datahike data
-   - opts: Options map (unused, kept for API compatibility)
+   - opts:  Options map. `:branches` selects which branches to walk NODES for:
+       • absent / `:all` (default) — every branch in the store's `:branches`
+         set (forks included). Heavier initial sync, but a subscriber can
+         `branch-as-db` any branch locally — instant branch-switch. This is
+         what fork-centric peers (dvergr distributed context) want.
+       • `:trunk` — only `:db`. Lean sync of the trunk replica.
+       • a branch keyword (e.g. `:db-foo`) or a coll of them — only those
+         (intersected with the store's actual branches). A lean replica of the
+         active branch; switching to an un-synced branch needs a fetch.
 
    Returns:
    - Channel yielding set of reachable keys
 
-   The returned set includes:
-   - `:branches` (the set of branch names)
-   - Every branch HEAD key (e.g. `:db`, `:db-foo`, `:db-bar` …) read from
-     `:branches` and falling back to `:db` if the set is missing.
-   - All BTSet node addresses reachable from each branch's
-     eavt/aevt/avet indices (live + temporal).
-   - Every branch's `:schema-meta-key`.
+   The returned set always includes:
+   - `:branches` (the set of branch names) — so a subscriber knows every branch
+     EXISTS via `(d/branches conn)` even when it didn't sync that branch's nodes.
+   And for each IN-SCOPE branch:
+   - the branch HEAD key (e.g. `:db`, `:db-foo` …),
+   - all BTSet node addresses reachable from its eavt/aevt/avet indices
+     (live + temporal), and its `:schema-meta-key`.
 
-   Earlier versions walked only the `:db` (trunk) root, which meant
-   non-trunk branches' HEADs never propagated to subscribed peers.
-   Clients could call `(d/branches conn)` (because the `:branches` set
-   itself was published through the write-hook on subsequent server
-   writes) but `(d/branch-as-db conn :db-foo)` returned nil because the
-   actual HEAD entry at key `:db-foo` was missing locally. Walking
-   every branch on initial sync closes that gap.
+   Note on scoping: walking ALL branches was added so `(d/branch-as-db conn
+   :db-foo)` resolves locally on a subscriber. Scoping narrows that back to the
+   chosen branches on purpose — an out-of-scope branch's HEAD/nodes are not
+   shipped, so `branch-as-db` on it returns nil until fetched. Use `:all` to
+   keep every fork local; scope it when the subscriber only views one branch.
 
    Usage with register-store!:
      (sync/register-store! ctx store config {:walk-fn datahike-walk-fn})
+     ;; scoped — wrap to inject opts:
+     {:walk-fn (fn [store opts] (datahike-walk-fn store (assoc opts :branches :trunk)))}
 
    Usage with perform-walk-sync (client):
      (tiered/perform-walk-sync frontend backend [:db]
        (fn [store root-values opts]
          (datahike-walk-fn store opts))
        opts)"
-  [store _opts]
+  [store opts]
   (go-try-
    (let [;; Read the branch set, falling back to {:db} if absent so a
          ;; fresh store still walks trunk before `:branches` has ever
          ;; been initialized.
-         branches (or (<?- (k/get store :branches))
-                      #{:db})
+         all-branches (or (<?- (k/get store :branches))
+                          #{:db})
+         scope (:branches opts)
+         branches (cond
+                    (or (nil? scope) (= :all scope)) all-branches
+                    (= :trunk scope)                 #{:db}
+                    (keyword? scope)                 (filter (set all-branches) #{scope})
+                    (coll? scope)                    (filter (set all-branches) scope)
+                    :else                            all-branches)
+         ;; always emit the :branches set (subscriber learns every branch name);
+         ;; HEAD keys + nodes only for the in-scope branches.
          collected (atom (conj (set branches) :branches))]
      (loop [bs (seq branches)]
        (when bs

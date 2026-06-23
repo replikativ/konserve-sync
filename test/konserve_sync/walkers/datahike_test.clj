@@ -162,3 +162,45 @@
           (when (and last-uuid-idx first-kw-idx)
             (is (< last-uuid-idx first-kw-idx)
                 "every content block sorts before every branch-pointer keyword")))))))
+
+(deftest test-walk-branch-scope
+  (testing ":branches opt scopes which branches' HEADs + nodes are walked;
+            :branches set is always emitted"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? true
+               :branch-history? true}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data [{:name "Trunk" :age 1}]})
+          _ (d/branch! conn :db :fork)
+          fork-conn (d/connect (assoc cfg :branch :fork))
+          _ (d/transact fork-conn {:tx-data [{:name "ForkOnly" :age 99}]})
+          store (-> conn d/db :store)
+          fork-blocks  (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :fork))))
+          trunk-blocks (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :db))))
+          ;; the fork shares most nodes with trunk (CoW); only this delta is fork-only
+          fork-only    (clojure.set/difference fork-blocks trunk-blocks)]
+
+      (testing ":all (default) reaches the fork head + blocks"
+        (let [all (<!! (walker/datahike-walk-fn store {:branches :all}))]
+          (is (contains? all :fork))
+          (is (clojure.set/subset? fork-blocks all))))
+
+      (testing ":trunk reaches :db + :branches but NOT the fork head/fork-only nodes"
+        (let [trunk (<!! (walker/datahike-walk-fn store {:branches :trunk}))]
+          (is (contains? trunk :db) "trunk head present")
+          (is (contains? trunk :branches) ":branches set always emitted (subscriber learns names)")
+          (is (not (contains? trunk :fork)) "fork head NOT shipped under :trunk scope")
+          (is (seq fork-only) "sanity: the fork has at least one node not shared with trunk")
+          (is (empty? (clojure.set/intersection fork-only trunk))
+              "no fork-ONLY nodes shipped under :trunk scope (shared CoW nodes are fine)")))
+
+      (testing "an explicit branch keyword scopes to that branch (intersected with real branches)"
+        (let [only-fork (<!! (walker/datahike-walk-fn store {:branches :fork}))]
+          (is (contains? only-fork :fork))
+          (is (clojure.set/subset? fork-blocks only-fork))
+          (is (contains? only-fork :branches)))
+        (let [bogus (<!! (walker/datahike-walk-fn store {:branches :does-not-exist}))]
+          (is (= #{:branches} bogus) "unknown branch ⇒ only the :branches marker"))))))
