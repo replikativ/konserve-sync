@@ -4,7 +4,8 @@
             [clojure.core.async :refer [<!!]]
             [datahike.api :as d]
             [konserve.core :as k]
-            [konserve-sync.walkers.datahike :as walker]))
+            [konserve-sync.walkers.datahike :as walker]
+            [clojure.set]))
 
 ;; =============================================================================
 ;; Test Fixtures
@@ -118,3 +119,123 @@
       (is (pos? (count (filter uuid? reachable-keys))))
 
       (d/release conn))))
+
+;; =============================================================================
+;; Fork / multi-branch reachability + sync-order (the "reflect a fork" keystone)
+;; =============================================================================
+
+(deftest test-walk-includes-fork-branch
+  (testing "walker reaches a FORK branch's head + blocks (not just trunk :db),
+            and content keys sort before mutable branch pointers"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? true        ; branching needs history
+               :branch-history? true}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data [{:name "Trunk" :age 1}]})
+          _ (d/branch! conn :db :fork)
+          fork-conn (d/connect (assoc cfg :branch :fork))
+          _ (d/transact fork-conn {:tx-data [{:name "ForkOnly" :age 99}]})
+          store (-> conn d/db :store)
+          reachable (<!! (walker/datahike-walk-fn store {}))]
+
+      (testing "the fork head pointer IS reached (the bug this fixes)"
+        (is (contains? reachable :fork)
+            "fork branch HEAD key must be walked so it propagates to subscribers")
+        (is (contains? reachable :branches))
+        (is (contains? (<!! (k/get store :branches)) :fork)))
+
+      (testing "fork's content blocks are reachable (so branch-as-db works remotely)"
+        (let [fork-db     (<!! (k/get store :fork))
+              fork-blocks (<!! (#'walker/walk-stored-db-async store fork-db))]
+          (is (seq fork-blocks))
+          (is (clojure.set/subset? fork-blocks reachable)
+              "every reachable block of the fork must be in the walk set")))
+
+      (testing "key-sort invariant: content (uuid) keys precede mutable pointers (keywords)"
+        (let [key-sort-fn   (fn [k] (if (keyword? k) 1 0))
+              sorted        (sort-by key-sort-fn reachable)
+              last-uuid-idx (->> sorted (keep-indexed (fn [i k] (when-not (keyword? k) i))) last)
+              first-kw-idx  (->> sorted (keep-indexed (fn [i k] (when (keyword? k) i))) first)]
+          (when (and last-uuid-idx first-kw-idx)
+            (is (< last-uuid-idx first-kw-idx)
+                "every content block sorts before every branch-pointer keyword")))))))
+
+(deftest test-walk-branch-scope
+  (testing ":branches opt scopes which branches' HEADs + nodes are walked;
+            :branches set is always emitted"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? true
+               :branch-history? true}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data [{:name "Trunk" :age 1}]})
+          _ (d/branch! conn :db :fork)
+          fork-conn (d/connect (assoc cfg :branch :fork))
+          _ (d/transact fork-conn {:tx-data [{:name "ForkOnly" :age 99}]})
+          store (-> conn d/db :store)
+          fork-blocks  (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :fork))))
+          trunk-blocks (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :db))))
+          ;; the fork shares most nodes with trunk (CoW); only this delta is fork-only
+          fork-only    (clojure.set/difference fork-blocks trunk-blocks)]
+
+      (testing ":all (default) reaches the fork head + blocks"
+        (let [all (<!! (walker/datahike-walk-fn store {:branches :all}))]
+          (is (contains? all :fork))
+          (is (clojure.set/subset? fork-blocks all))))
+
+      (testing ":trunk reaches :db + :branches but NOT the fork head/fork-only nodes"
+        (let [trunk (<!! (walker/datahike-walk-fn store {:branches :trunk}))]
+          (is (contains? trunk :db) "trunk head present")
+          (is (contains? trunk :branches) ":branches set always emitted (subscriber learns names)")
+          (is (not (contains? trunk :fork)) "fork head NOT shipped under :trunk scope")
+          (is (seq fork-only) "sanity: the fork has at least one node not shared with trunk")
+          (is (empty? (clojure.set/intersection fork-only trunk))
+              "no fork-ONLY nodes shipped under :trunk scope (shared CoW nodes are fine)")))
+
+      (testing "an explicit branch keyword scopes to that branch (intersected with real branches)"
+        (let [only-fork (<!! (walker/datahike-walk-fn store {:branches :fork}))]
+          (is (contains? only-fork :fork))
+          (is (clojure.set/subset? fork-blocks only-fork))
+          (is (contains? only-fork :branches)))
+        (let [bogus (<!! (walker/datahike-walk-fn store {:branches :does-not-exist}))]
+          (is (= #{:branches} bogus) "unknown branch ⇒ only the :branches marker"))))))
+
+(deftest test-walk-branch-subset
+  (testing "a COLL of branches walks exactly that subset (more than one, fewer than all)"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? true
+               :branch-history? true}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data [{:name "Trunk" :age 1}]})
+          _ (d/branch! conn :db :fork-a)
+          _ (d/branch! conn :db :fork-b)
+          ca (d/connect (assoc cfg :branch :fork-a))
+          cb (d/connect (assoc cfg :branch :fork-b))
+          _ (d/transact ca {:tx-data [{:name "OnlyA" :age 11}]})
+          _ (d/transact cb {:tx-data [{:name "OnlyB" :age 22}]})
+          store (-> conn d/db :store)
+          trunk-blocks (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :db))))
+          a-only (clojure.set/difference
+                  (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :fork-a))))
+                  trunk-blocks)
+          b-only (clojure.set/difference
+                  (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :fork-b))))
+                  trunk-blocks)
+          ;; subset = trunk + fork-a, but NOT fork-b
+          walked (<!! (walker/datahike-walk-fn store {:branches #{:db :fork-a}}))]
+      (is (seq a-only)) (is (seq b-only))
+      (is (contains? walked :db))      (is (contains? walked :fork-a))
+      (is (not (contains? walked :fork-b)) "out-of-subset branch HEAD not shipped")
+      (is (contains? walked :branches) "all three branch names still learnable")
+      (is (= #{:db :fork-a :fork-b} (<!! (k/get store :branches))))
+      (is (clojure.set/subset? a-only walked) "in-subset fork's own nodes shipped")
+      (is (empty? (clojure.set/intersection b-only walked))
+          "out-of-subset fork's own nodes NOT shipped"))))

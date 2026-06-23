@@ -79,7 +79,8 @@
                                       meta (<! (k/get-meta store k))]
                                   (recur (next remaining)
                                          (if meta
-                                           (conj result {:key k :last-write (:last-write meta)})
+                                           (conj result {:key k :last-write (:last-write meta)
+                                                         :immutable? (:immutable? meta)})
                                            result))))))
                           ;; Default: get all keys via k/keys
                           (<! (k/keys store)))
@@ -95,7 +96,11 @@
 
           ;; Sort if key-sort-fn provided
           sorted-keys (cond->> (map :key keys-to-send)
-                        key-sort-fn (sort-by key-sort-fn))]
+                        key-sort-fn (sort-by key-sort-fn))
+          ;; keys whose stored metadata marks them immutable (content-addressed,
+          ;; write-once) — the handshake item carries this so a reconnecting peer
+          ;; that already holds the value skips re-storing (and re-publishing) it.
+          immutable-keys (into #{} (comp (filter :immutable?) (map :key)) keys-to-send)]
 
       (log/debug! {:id ::keys-to-sync
                    :msg "Computed keys to sync"
@@ -109,7 +114,8 @@
           (let [k (first remaining)
                 v (<! (k/get store k))]
             (recur (next remaining)
-                   (conj result {:key k :value v}))))))))
+                   (conj result (cond-> {:key k :value v}
+                                  (immutable-keys k) (assoc :meta {:immutable? true}))))))))))
 
 (extend-type StoreSyncStrategy
   proto/PSyncStrategy
@@ -149,19 +155,24 @@
         (close! ch)
         ch)))
 
-  (-apply-handshake-item [this {:keys [key value]}]
+  (-apply-handshake-item [this {:keys [key value meta]}]
     ;; Client applies handshake item to local store
     (let [ch (chan 1)]
       (if (= :client (:role this))
         (go
           (try
-            (log/trace! {:id ::apply-handshake-item
-                         :msg "Applying handshake item"
-                         :data {:key key}})
-            (<! (k/assoc (:store this) key value))
-            ;; Invoke callback if provided
-            (when-let [on-key-update (get-in this [:opts :on-key-update])]
-              (on-key-update key value :handshake))
+            (if (and (:immutable? meta) (<! (k/exists? (:store this) key)))
+              ;; immutable value already held (reconnect / overlap) — skip the
+              ;; re-store so its write-hook doesn't re-publish (echo).
+              (log/trace! {:id ::apply-handshake-skip-immutable :data {:key key}})
+              (do
+                (log/trace! {:id ::apply-handshake-item
+                             :msg "Applying handshake item"
+                             :data {:key key}})
+                (<! (k/assoc (:store this) key value))
+                ;; Invoke callback if provided
+                (when-let [on-key-update (get-in this [:opts :on-key-update])]
+                  (on-key-update key value :handshake))))
             (put! ch {:ok true})
             (catch #?(:clj Exception :cljs js/Error) e
               (log/error! {:id ::apply-handshake-error
@@ -175,21 +186,31 @@
           (close! ch)))
       ch))
 
-  (-apply-publish [this {:keys [key value operation] :as payload}]
+  (-apply-publish [this {:keys [key value operation meta] :as payload}]
     ;; Apply publish to local store (both client and server can receive)
     (let [ch (chan 1)]
       (go
         (try
-          (case operation
-            :dissoc
-            (<! (k/dissoc (:store this) key))
+          (if (and (:immutable? meta)
+                   (not= operation :dissoc)
+                   (<! (k/exists? (:store this) key)))
+            ;; immutable + already present ⇒ skip. No k/assoc ⇒ no write-hook ⇒ no
+            ;; re-publish: the bidirectional echo terminates in ONE propagation wave
+            ;; (content-addressed values are identical across peers, so "present"
+            ;; means "identical"). Mutable cells (roots) never reach here — they ride
+            ;; the convergent δ path, not the node push.
+            (log/trace! {:id ::apply-publish-skip-immutable :data {:key key}})
+            (do
+              (case operation
+                :dissoc
+                (<! (k/dissoc (:store this) key))
 
-            ;; Default: assoc
-            (<! (k/assoc (:store this) key value)))
+                ;; Default: assoc
+                (<! (k/assoc (:store this) key value)))
 
-          ;; Invoke callback if provided
-          (when-let [on-key-update (get-in this [:opts :on-key-update])]
-            (on-key-update key value (or operation :assoc)))
+              ;; Invoke callback if provided
+              (when-let [on-key-update (get-in this [:opts :on-key-update])]
+                (on-key-update key value (or operation :assoc)))))
 
           (put! ch {:ok true})
           (catch #?(:clj Exception :cljs js/Error) e
@@ -251,7 +272,11 @@
             (log/debug! {:id ::write-hook-publish
                          :msg "Publishing single key"
                          :data {:key key :topic topic :subscribers (count subscribers)}})
-            (pubsub/publish! peer topic {:key key :value value :operation :assoc}))
+            ;; forward the value's metadata (:immutable? marks content-addressed,
+            ;; write-once values) so a receiver can skip re-storing one it already
+            ;; has — terminating the bidirectional write-hook echo.
+            (pubsub/publish! peer topic (cond-> {:key key :value value :operation :assoc}
+                                          (:meta event) (assoc :meta (:meta event)))))
 
           ;; Delete
           :dissoc
@@ -272,9 +297,14 @@
                                 :topic topic
                                 :subscribers (count subscribers)
                                 :keys (mapv first sorted-kvs)}})
-            (doseq [[k v] sorted-kvs]
-              (when (filter-fn k v)
-                (pubsub/publish! peer topic {:key k :value v :operation :assoc}))))
+            ;; per-key meta is a pure-data map {key -> meta} (e.g. mark nodes immutable but
+            ;; the batch's mutable branch-head pointer not); look it up per key.
+            (let [m (:meta event)]
+              (doseq [[k v] sorted-kvs]
+                (when (filter-fn k v)
+                  (let [km (get m k)]
+                    (pubsub/publish! peer topic (cond-> {:key k :value v :operation :assoc}
+                                                  km (assoc :meta km))))))))
 
           ;; Unknown - ignore
           (log/warn! {:id ::write-hook-unknown-op
