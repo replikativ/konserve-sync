@@ -297,11 +297,14 @@
                                 :topic topic
                                 :subscribers (count subscribers)
                                 :keys (mapv first sorted-kvs)}})
-            (let [m (:meta event)]                       ; batch-level meta (all nodes uniformly immutable)
+            ;; per-key meta via :meta-fn (e.g. mark nodes immutable but the batch's mutable
+            ;; branch-head pointer not), or a static :meta map applied to the whole batch.
+            (let [mf (:meta-fn event) m (:meta event)]
               (doseq [[k v] sorted-kvs]
                 (when (filter-fn k v)
-                  (pubsub/publish! peer topic (cond-> {:key k :value v :operation :assoc}
-                                                m (assoc :meta m)))))))
+                  (let [km (if mf (mf k) m)]
+                    (pubsub/publish! peer topic (cond-> {:key k :value v :operation :assoc}
+                                                  km (assoc :meta km))))))))
 
           ;; Unknown - ignore
           (log/warn! {:id ::write-hook-unknown-op
