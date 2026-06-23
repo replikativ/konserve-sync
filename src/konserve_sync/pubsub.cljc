@@ -297,12 +297,12 @@
                                 :topic topic
                                 :subscribers (count subscribers)
                                 :keys (mapv first sorted-kvs)}})
-            ;; per-key meta via :meta-fn (e.g. mark nodes immutable but the batch's mutable
-            ;; branch-head pointer not), or a static :meta map applied to the whole batch.
-            (let [mf (:meta-fn event) m (:meta event)]
+            ;; per-key meta is a pure-data map {key -> meta} (e.g. mark nodes immutable but
+            ;; the batch's mutable branch-head pointer not); look it up per key.
+            (let [m (:meta event)]
               (doseq [[k v] sorted-kvs]
                 (when (filter-fn k v)
-                  (let [km (if mf (mf k) m)]
+                  (let [km (get m k)]
                     (pubsub/publish! peer topic (cond-> {:key k :value v :operation :assoc}
                                                   km (assoc :meta km))))))))
 
