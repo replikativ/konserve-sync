@@ -46,32 +46,40 @@
   "konserve-sync `:walk-fn` for a co-located composite store: every PSS node
    reachable from `:composite/root` (the index) and from each sub's roots-cell
    (read from the `:composite/subs` manifest), plus all pointer cells. Orphan
-   blocks are pruned. `(fn [store _opts] -> channel<set-of-reachable-keys>)`."
-  [store _opts]
-  (go-try-
-   (let [manifest (<?- (k/get store composite-subs-key))
-         pointer-keys (into #{composite-root-key composite-freed-key composite-subs-key}
-                            (mapcat (fn [s] [(:roots-key s) (:freed-key s)]))
-                            manifest)
-         collected (atom pointer-keys)]
-     ;; the composite index tree (root is a bare address)
-     (<?- (pss/walk-pss-node-async store (<?- (k/get store composite-root-key)) collected))
-     ;; each co-located sub's tree(s)
-     (loop [ss (seq manifest)]
-       (when ss
-         (let [roots (<?- (k/get store (:roots-key (first ss))))]
-           (loop [rs (seq (vals roots))]
-             (when rs
-               (<?- (pss/walk-pss-node-async store (first rs) collected))
-               (recur (next rs)))))
-         (recur (next ss))))
-     @collected)))
+   blocks are pruned. `(fn [store opts] -> channel<set-of-reachable-keys>)`.
+
+   `addresses-fn` (3-arity) projects a stored node to its child addresses —
+   default `:addresses` (plain-map nodes); object-storing consumers (whose `k/get`
+   returns PSS Leaf/Branch objects) pass e.g. yggdrasil's `node-child-addresses`."
+  ([store opts] (composite-walk-fn store opts :addresses))
+  ([store _opts addresses-fn]
+   (go-try-
+    (let [manifest (<?- (k/get store composite-subs-key))
+          pointer-keys (into #{composite-root-key composite-freed-key composite-subs-key}
+                             (mapcat (fn [s] [(:roots-key s) (:freed-key s)]))
+                             manifest)
+          collected (atom pointer-keys)]
+      ;; the composite index tree (root is a bare address)
+      (<?- (pss/walk-pss-node-async store (<?- (k/get store composite-root-key)) collected addresses-fn))
+      ;; each co-located sub's tree(s)
+      (loop [ss (seq manifest)]
+        (when ss
+          (let [roots (<?- (k/get store (:roots-key (first ss))))]
+            (loop [rs (seq (vals roots))]
+              (when rs
+                (<?- (pss/walk-pss-node-async store (first rs) collected addresses-fn))
+                (recur (next rs)))))
+          (recur (next ss))))
+      @collected))))
 
 (defn composite-sync-opts
   "Options bundle for `register-store!` / `subscribe-store!` on a co-located
    composite store: the reachability walker + the `:composite/root`-last gate.
+   `addresses-fn` (1-arity) overrides the node→child-addresses projection for
+   object-storing consumers (default `:addresses`, plain-map nodes).
 
      (register-store! peer topic (:kv-store composite) (composite-sync-opts))"
-  []
-  {:walk-fn composite-walk-fn
-   :key-sort-fn composite-key-last})
+  ([] (composite-sync-opts :addresses))
+  ([addresses-fn]
+   {:walk-fn (fn [store opts] (composite-walk-fn store opts addresses-fn))
+    :key-sort-fn composite-key-last}))
