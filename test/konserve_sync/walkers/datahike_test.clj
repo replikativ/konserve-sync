@@ -204,3 +204,38 @@
           (is (contains? only-fork :branches)))
         (let [bogus (<!! (walker/datahike-walk-fn store {:branches :does-not-exist}))]
           (is (= #{:branches} bogus) "unknown branch ⇒ only the :branches marker"))))))
+
+(deftest test-walk-branch-subset
+  (testing "a COLL of branches walks exactly that subset (more than one, fewer than all)"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? true
+               :branch-history? true}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data [{:name "Trunk" :age 1}]})
+          _ (d/branch! conn :db :fork-a)
+          _ (d/branch! conn :db :fork-b)
+          ca (d/connect (assoc cfg :branch :fork-a))
+          cb (d/connect (assoc cfg :branch :fork-b))
+          _ (d/transact ca {:tx-data [{:name "OnlyA" :age 11}]})
+          _ (d/transact cb {:tx-data [{:name "OnlyB" :age 22}]})
+          store (-> conn d/db :store)
+          trunk-blocks (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :db))))
+          a-only (clojure.set/difference
+                  (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :fork-a))))
+                  trunk-blocks)
+          b-only (clojure.set/difference
+                  (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :fork-b))))
+                  trunk-blocks)
+          ;; subset = trunk + fork-a, but NOT fork-b
+          walked (<!! (walker/datahike-walk-fn store {:branches #{:db :fork-a}}))]
+      (is (seq a-only)) (is (seq b-only))
+      (is (contains? walked :db))      (is (contains? walked :fork-a))
+      (is (not (contains? walked :fork-b)) "out-of-subset branch HEAD not shipped")
+      (is (contains? walked :branches) "all three branch names still learnable")
+      (is (= #{:db :fork-a :fork-b} (<!! (k/get store :branches))))
+      (is (clojure.set/subset? a-only walked) "in-subset fork's own nodes shipped")
+      (is (empty? (clojure.set/intersection b-only walked))
+          "out-of-subset fork's own nodes NOT shipped"))))
