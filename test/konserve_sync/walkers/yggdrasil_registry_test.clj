@@ -1,6 +1,6 @@
 (ns konserve-sync.walkers.yggdrasil-registry-test
   "Tests for the registry subscriber-side projection. The registry is a 2P-Set
-   (`:crdt/roots {:adds :removals}`); its sync/walk is the generic crdt walker
+   (`:crdt.head/main {:adds :removals}`); its sync/walk is the generic crdt walker
    (see crdt-test). Here we only test the read-out: live = adds − removals,
    shaped as RegistryEntry maps, + latest-by-system-branch. The store is
    hand-built to the on-disk contract (no yggdrasil dependency)."
@@ -18,7 +18,7 @@
 (defn- build-registry-store!
   "A memory store shaped like a 2P-Set registry: an :adds tree (one branch over
    two leaves) and a :removals tree (one leaf tombstoning e-b), under
-   :crdt/roots {:adds :removals}."
+   :crdt.head/main {:adds :removals}."
   []
   (let [store (<!! (new-mem-store))
         e-a  (entry "kb-1" "main" "snap-a" 100 0)
@@ -32,7 +32,7 @@
     (<!! (k/assoc store adds-root {:level 1 :keys [] :addresses [leaf1 leaf2]} {:sync? false}))
     ;; removals tombstones e-b (deregistered)
     (<!! (k/assoc store rem-leaf {:level 0 :keys [e-b]} {:sync? false}))
-    (<!! (k/assoc store :crdt/roots {:adds adds-root :removals rem-leaf} {:sync? false}))
+    (<!! (k/assoc store :crdt.head/main {:adds adds-root :removals rem-leaf} {:sync? false}))
     (<!! (k/assoc store :crdt/freed {} {:sync? false}))
     {:store store :live [e-a e-b2 e-c] :removed [e-b]}))
 

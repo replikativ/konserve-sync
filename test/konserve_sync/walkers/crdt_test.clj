@@ -26,8 +26,9 @@
     (<!! (k/assoc store leaf-b {:level 0 :keys [:b]} {:sync? false}))
     (<!! (k/assoc store root-main {:level 1 :keys [] :addresses [leaf-shared leaf-a]} {:sync? false}))
     (<!! (k/assoc store root-fork {:level 1 :keys [] :addresses [leaf-shared leaf-b]} {:sync? false}))
-    (<!! (k/assoc store :crdt/roots {:main root-main :fork root-fork} {:sync? false}))
-    (<!! (k/assoc store :crdt/freed {} {:sync? false}))
+    (<!! (k/assoc store :crdt.head/main {:root root-main} {:sync? false}))
+    (<!! (k/assoc store :crdt.head/fork {:root root-fork} {:sync? false}))
+    (<!! (k/assoc store :crdt/branches #{:main :fork} {:sync? false}))
     (<!! (k/assoc store (random-uuid) {:level 0 :keys [:orphan]} {:sync? false}))
     {:store store :root-main root-main :root-fork root-fork
      :leaf-shared leaf-shared :leaf-a leaf-a :leaf-b leaf-b}))
@@ -36,8 +37,9 @@
   (testing "walker reaches every node from EVERY branch root + the pointers"
     (let [{:keys [store root-main root-fork leaf-shared leaf-a leaf-b]} (build-crdt-store!)
           reachable (<!! (crdt/crdt-walk-fn store {}))]
-      (is (contains? reachable :crdt/roots))
-      (is (contains? reachable :crdt/freed))
+      (is (contains? reachable :crdt/branches))
+      (is (contains? reachable :crdt.head/main))
+      (is (contains? reachable :crdt.head/fork))
       (is (contains? reachable root-main))
       (is (contains? reachable root-fork))
       (is (contains? reachable leaf-shared) "the shared leaf is reached once")
@@ -56,5 +58,5 @@
     (let [opts (crdt/crdt-sync-opts)]
       (is (fn? (:walk-fn opts)))
       (is (= pss/keyword-last (:key-sort-fn opts)))
-      (is (= 1 (pss/keyword-last :crdt/roots)) "mutable pointer sorts last")
+      (is (= 1 (pss/keyword-last :crdt.head/main)) "mutable pointer sorts last")
       (is (= 0 (pss/keyword-last (random-uuid))) "content block sorts first"))))

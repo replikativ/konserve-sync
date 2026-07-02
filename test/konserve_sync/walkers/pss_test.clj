@@ -21,14 +21,15 @@
     (<!! (k/assoc store leaf-a {:level 0 :keys [:a]} {:sync? false}))
     (<!! (k/assoc store leaf-b {:level 0 :keys [:b]} {:sync? false}))
     (<!! (k/assoc store root {:level 1 :keys [] child-key [leaf-a leaf-b]} {:sync? false}))
-    (<!! (k/assoc store :crdt/roots {:main root} {:sync? false}))
-    (<!! (k/assoc store :crdt/freed {} {:sync? false}))
+    ;; per-branch head-cell layout: registry + one head cell (root as a bare address here).
+    (<!! (k/assoc store :crdt.head/main {:root root} {:sync? false}))
+    (<!! (k/assoc store :crdt/branches #{:main} {:sync? false}))
     {:store store :root root :leaf-a leaf-a :leaf-b leaf-b}))
 
 (deftest default-addresses-fn-reaches-map-nodes
   (testing "the default `:addresses` projector walks plain-map branch nodes"
     (let [{:keys [store root leaf-a leaf-b]} (build-store! :addresses)
-          walk      (pss/make-pss-walk-fn :crdt/roots #{:crdt/roots :crdt/freed})
+          walk      (pss/make-pss-walk-fn :crdt/branches pss/default-head-key)
           reachable (<!! (walk store {}))]
       (is (contains? reachable root))
       (is (contains? reachable leaf-a) "child leaf reached")
@@ -39,12 +40,12 @@
             the default walker collapses to the root alone — the latent bug — while
             an injected `:addresses-fn` reaches the whole tree (the fix)"
     (let [{:keys [store root leaf-a leaf-b]} (build-store! :child-addrs)
-          default-walk (pss/make-pss-walk-fn :crdt/roots #{:crdt/roots :crdt/freed})
+          default-walk (pss/make-pss-walk-fn :crdt/branches pss/default-head-key)
           default-set  (<!! (default-walk store {}))]
       (is (contains? default-set root))
       (is (not (contains? default-set leaf-a)) "BUG shape: leaves unreachable via :addresses")
       (is (not (contains? default-set leaf-b)))
-      (let [object-walk (pss/make-pss-walk-fn :crdt/roots #{:crdt/roots :crdt/freed} :child-addrs)
+      (let [object-walk (pss/make-pss-walk-fn :crdt/branches pss/default-head-key true :child-addrs)
             object-set  (<!! (object-walk store {}))]
         (is (contains? object-set root))
         (is (contains? object-set leaf-a) "FIX: injected projector reaches the leaves")
@@ -53,7 +54,7 @@
 (deftest sync-opts-threads-addresses-fn
   (testing "make-pss-sync-opts forwards the custom addresses-fn into its walker"
     (let [{:keys [store leaf-a]} (build-store! :child-addrs)
-          opts (pss/make-pss-sync-opts :crdt/roots #{:crdt/roots :crdt/freed} :child-addrs)
+          opts (pss/make-pss-sync-opts :crdt/branches pss/default-head-key true :child-addrs)
           reachable (<!! ((:walk-fn opts) store {}))]
       (is (= pss/keyword-last (:key-sort-fn opts)))
       (is (contains? reachable leaf-a) "the threaded projector reaches the leaves"))))

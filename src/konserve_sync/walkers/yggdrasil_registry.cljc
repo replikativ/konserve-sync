@@ -3,7 +3,7 @@
 
    The registry is now just a durable conflict-free system — a content-addressed
    **2P-Set** of RegistryEntry — so it SYNCS through the generic
-   `konserve-sync.walkers.crdt` walker (its store uses the `:crdt/roots` cell
+   `konserve-sync.walkers.crdt` walker (its store uses the `:crdt.head/main` cell
    like any durable CRDT). This namespace no longer defines a walker; it keeps
    only the registry-FLAVORED read-out a subscriber needs to interpret the
    synced 2P-Set as live RegistryEntry maps.
@@ -11,7 +11,7 @@
    On-disk shape (serialized by `yggdrasil.storage/KonserveStorage` as plain
    maps — no yggdrasil dependency, runs on a read-only cljs peer):
 
-     :crdt/roots → {:adds <root> :removals <root>}
+     :crdt.head/main → {:adds <node> :removals <node>}
      <node>      → {:level :keys [<RegistryEntry-as-map> …] :addresses […]}
 
    live(entry) ⇔ entry ∈ adds ∧ entry ∉ removals.
@@ -47,7 +47,17 @@
 (defn- collect-from-root [store root]
   (go-try-
    (let [acc (atom []) seen (atom #{})]
-     (when root (<?- (collect-entries-async store root acc seen)))
+     (cond
+       (nil? root) nil
+       ;; a FUSED root node (inlined in the head cell) is a plain map — process its keys +
+       ;; recurse its child ADDRESSES directly (its own address isn't in the store).
+       (map? root) (do (when-let [ks (:keys root)] (swap! acc into ks))
+                       (loop [as (seq (:addresses root))]
+                         (when as
+                           (<?- (collect-entries-async store (first as) acc seen))
+                           (recur (next as)))))
+       ;; a bare address → walk from it.
+       :else (<?- (collect-entries-async store root acc seen)))
      @acc)))
 
 (defn read-registry-entries
@@ -63,9 +73,9 @@
    Pure read traversal — safe on a read-only ClojureScript peer."
   [store]
   (go-try-
-   (let [roots   (<?- (k/get store :crdt/roots))
-         adds    (<?- (collect-from-root store (:adds roots)))
-         removed (set (<?- (collect-from-root store (:removals roots))))]
+   (let [head    (<?- (k/get store :crdt.head/main))
+         adds    (<?- (collect-from-root store (:adds head)))
+         removed (set (<?- (collect-from-root store (:removals head))))]
      (into [] (remove removed) adds))))
 
 ;; ============================================================================

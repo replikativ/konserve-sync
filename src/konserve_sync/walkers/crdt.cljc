@@ -9,14 +9,15 @@
      :crdt/roots  →  {<branch> <root-address>}
      :crdt/freed  →  {<address> <ts>}   (GC bookkeeping)
 
-   So this is just the generic `konserve-sync.walkers.pss` walker bound to those
-   keys. No yggdrasil dependency; runs on a read-only ClojureScript peer."
+   So this is just the generic `konserve-sync.walkers.pss` walker bound to the
+   per-branch head-cell layout (`:crdt/branches` registry + `:crdt.head/<branch>`
+   cells). No yggdrasil dependency; runs on a read-only ClojureScript peer."
   (:require [konserve-sync.walkers.pss :as pss]))
 
 (def crdt-walk-fn
-  "Walker: every PSS node reachable from `:crdt/roots` (one root per branch)
-   plus the `:crdt/roots` / `:crdt/freed` pointers."
-  (pss/make-pss-walk-fn :crdt/roots #{:crdt/roots :crdt/freed}))
+  "Walker: every PSS node reachable from each branch's head cell (enumerated via the
+   `:crdt/branches` registry) plus the registry + head-cell pointers."
+  (pss/make-pss-walk-fn :crdt/branches pss/default-head-key))
 
 (defn crdt-sync-opts
   "Options bundle for `register-store!` / `subscribe-store!` on a durable CRDT
