@@ -6,9 +6,9 @@
      <uuid>            → composite index node OR sub-system node {:level :keys …}
      :composite/root   → the composite index ROOT address (a bare address)
      :composite/freed  → composite GC bookkeeping
-     :composite/subs   → [{:roots-key :freed-key} …]  manifest of co-located subs
-     [:crdt/roots id]  → {<branch> <root>}  per co-located sub
-     [:crdt/freed id]  → {<address> <ts>}   per co-located sub
+     :composite/subs   → [{:branches-key :cell-ns} …]  manifest of co-located subs
+     :crdt.branches/<id>        → #{<branch> …}          per co-located sub registry
+     :crdt.head/<id>::<branch>  → {:root node} | {:adds :removals}  per sub branch head
 
    The walk ships every node reachable from the composite index root AND from
    every sub's roots, plus the pointer cells. The fetch-gate publishes content
@@ -54,21 +54,24 @@
   ([store opts] (composite-walk-fn store opts :addresses))
   ([store _opts addresses-fn]
    (go-try-
-    (let [manifest (<?- (k/get store composite-subs-key))
-          pointer-keys (into #{composite-root-key composite-freed-key composite-subs-key}
-                             (mapcat (fn [s] [(:roots-key s) (:freed-key s)]))
-                             manifest)
-          collected (atom pointer-keys)]
+    (let [manifest  (<?- (k/get store composite-subs-key))
+          collected (atom #{composite-root-key composite-freed-key composite-subs-key})]
       ;; the composite index tree (root is a bare address)
       (<?- (pss/walk-pss-node-async store (<?- (k/get store composite-root-key)) collected addresses-fn))
-      ;; each co-located sub's tree(s)
+      ;; each co-located sub: its branch registry → each head cell → walk its roots
       (loop [ss (seq manifest)]
         (when ss
-          (let [roots (<?- (k/get store (:roots-key (first ss))))]
-            (loop [rs (seq (vals roots))]
-              (when rs
-                (<?- (pss/walk-pss-node-async store (first rs) collected addresses-fn))
-                (recur (next rs)))))
+          (let [s  (first ss)
+                bk (:branches-key s)
+                cn (:cell-ns s)]
+            (swap! collected conj bk)
+            (loop [bs (seq (<?- (k/get store bk)))]
+              (when bs
+                (let [hk   (pss/co-located-head-key cn (first bs))
+                      head (<?- (k/get store hk))]
+                  (swap! collected conj hk)
+                  (<?- (pss/walk-head-roots! store head collected addresses-fn)))
+                (recur (next bs)))))
           (recur (next ss))))
       @collected))))
 
