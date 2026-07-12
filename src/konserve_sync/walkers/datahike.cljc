@@ -146,9 +146,21 @@
          active branch; switching to an un-synced branch needs a fetch.
 
    Returns:
-   - Channel yielding set of reachable keys
+   - Channel yielding an ORDERED, deduped vector of reachable keys:
+     the index NODES first, then the MUTABLE pointer cells LAST
+     (`:branches`, then each in-scope branch HEAD).
 
-   The returned set always includes:
+   That order is the whole contract. Nodes are content-addressed and UNREACHABLE
+   until a head points at them, so their order among themselves is irrelevant —
+   but a head applied BEFORE its nodes would leave a subscriber that PERSISTS the
+   sync (IndexedDB, LMDB) holding a pointer into values that never arrived, if the
+   handshake were interrupted. Emitting the pointers last makes that impossible by
+   construction, and konserve-sync preserves walk order — so nothing downstream has
+   to infer the order back from the SHAPE of a key (the old `:key-sort-fn`
+   \"keywords are roots, sort them last\" heuristic, which is silently wrong for any
+   store whose keys don't fit the guess).
+
+   The returned vector always includes:
    - `:branches` (the set of branch names) — so a subscriber knows every branch
      EXISTS via `(d/branches conn)` even when it didn't sync that branch's nodes.
    And for each IN-SCOPE branch:
@@ -186,17 +198,23 @@
                     (keyword? scope)                 (filter (set all-branches) #{scope})
                     (coll? scope)                    (filter (set all-branches) scope)
                     :else                            all-branches)
-         ;; always emit the :branches set (subscriber learns every branch name);
-         ;; HEAD keys + nodes only for the in-scope branches.
-         collected (atom (conj (set branches) :branches))]
+         ;; NODES only here — the mutable pointer cells are appended LAST, below.
+         nodes (atom [])]
      (loop [bs (seq branches)]
        (when bs
          (let [branch-key (first bs)]
            (when-let [stored-db (<?- (k/get store branch-key))]
              (let [addrs (<?- (walk-stored-db-async store stored-db))]
-               (swap! collected into addrs)))
+               (swap! nodes into addrs)))
            (recur (next bs)))))
-     @collected)))
+     ;; Reachable index nodes FIRST, mutable pointer cells LAST: `:branches` (the
+     ;; branch-name set, so a subscriber learns every branch EXISTS even when it
+     ;; didn't sync that branch's nodes) and then each in-scope branch HEAD. A head
+     ;; is only ever applied once every node it references has been — see the
+     ;; docstring.
+     (-> (vec (distinct @nodes))
+         (conj :branches)
+         (into branches)))))
 
 ;; ============================================================================
 ;; Convenience wrapper for tiered store walk-sync

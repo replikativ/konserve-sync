@@ -56,10 +56,10 @@
           store (-> conn d/db :store)
 
           ;; Walk returns channel
-          reachable-keys (<!! (walker/datahike-walk-fn store {}))]
+          reachable-keys (set (<!! (walker/datahike-walk-fn store {})))]
 
       ;; Should include :db
-      (is (contains? reachable-keys :db))
+      (is (contains? (set reachable-keys) :db))
 
       ;; Should find BTSet addresses (UUIDs)
       (let [uuid-keys (filter uuid? reachable-keys)]
@@ -88,10 +88,10 @@
           _ (d/transact conn {:tx-data [{:name "Bob" :age 25}]})
           store (-> conn d/db :store)
 
-          reachable-keys (<!! (walker/datahike-walk-fn store {}))]
+          reachable-keys (set (<!! (walker/datahike-walk-fn store {})))]
 
       ;; With history, we should have more keys due to temporal indices
-      (is (contains? reachable-keys :db))
+      (is (contains? (set reachable-keys) :db))
       (is (pos? (count (filter uuid? reachable-keys))))
 
       (d/release conn))))
@@ -115,7 +115,7 @@
           ;; Call it with the expected signature
           reachable-keys (<!! (tiered-walk-fn store {:db "some-db-value"} {}))]
 
-      (is (contains? reachable-keys :db))
+      (is (contains? (set reachable-keys) :db))
       (is (pos? (count (filter uuid? reachable-keys))))
 
       (d/release conn))))
@@ -139,7 +139,7 @@
           fork-conn (d/connect (assoc cfg :branch :fork))
           _ (d/transact fork-conn {:tx-data [{:name "ForkOnly" :age 99}]})
           store (-> conn d/db :store)
-          reachable (<!! (walker/datahike-walk-fn store {}))]
+          reachable (set (<!! (walker/datahike-walk-fn store {})))]
 
       (testing "the fork head pointer IS reached (the bug this fixes)"
         (is (contains? reachable :fork)
@@ -182,7 +182,7 @@
           _ (d/transact conn {:tx-data (mapv (fn [i] {:name (str "e" i) :age i})
                                              (range 1500))})
           store (-> conn d/db :store)
-          reachable (<!! (walker/datahike-walk-fn store {}))]
+          reachable (set (<!! (walker/datahike-walk-fn store {})))]
 
       (is (> (count (filter uuid? reachable)) 8)
           "walk must descend past the index roots into leaf nodes")
@@ -220,12 +220,12 @@
           fork-only    (clojure.set/difference fork-blocks trunk-blocks)]
 
       (testing ":all (default) reaches the fork head + blocks"
-        (let [all (<!! (walker/datahike-walk-fn store {:branches :all}))]
+        (let [all (set (<!! (walker/datahike-walk-fn store {:branches :all})))]
           (is (contains? all :fork))
           (is (clojure.set/subset? fork-blocks all))))
 
       (testing ":trunk reaches :db + :branches but NOT the fork head/fork-only nodes"
-        (let [trunk (<!! (walker/datahike-walk-fn store {:branches :trunk}))]
+        (let [trunk (set (<!! (walker/datahike-walk-fn store {:branches :trunk})))]
           (is (contains? trunk :db) "trunk head present")
           (is (contains? trunk :branches) ":branches set always emitted (subscriber learns names)")
           (is (not (contains? trunk :fork)) "fork head NOT shipped under :trunk scope")
@@ -234,11 +234,11 @@
               "no fork-ONLY nodes shipped under :trunk scope (shared CoW nodes are fine)")))
 
       (testing "an explicit branch keyword scopes to that branch (intersected with real branches)"
-        (let [only-fork (<!! (walker/datahike-walk-fn store {:branches :fork}))]
+        (let [only-fork (set (<!! (walker/datahike-walk-fn store {:branches :fork})))]
           (is (contains? only-fork :fork))
           (is (clojure.set/subset? fork-blocks only-fork))
           (is (contains? only-fork :branches)))
-        (let [bogus (<!! (walker/datahike-walk-fn store {:branches :does-not-exist}))]
+        (let [bogus (set (<!! (walker/datahike-walk-fn store {:branches :does-not-exist})))]
           (is (= #{:branches} bogus) "unknown branch ⇒ only the :branches marker"))))))
 
 (deftest test-walk-branch-subset
@@ -266,7 +266,7 @@
                   (<!! (#'walker/walk-stored-db-async store (<!! (k/get store :fork-b))))
                   trunk-blocks)
           ;; subset = trunk + fork-a, but NOT fork-b
-          walked (<!! (walker/datahike-walk-fn store {:branches #{:db :fork-a}}))]
+          walked (set (<!! (walker/datahike-walk-fn store {:branches #{:db :fork-a}})))]
       (is (seq a-only)) (is (seq b-only))
       (is (contains? walked :db))      (is (contains? walked :fork-a))
       (is (not (contains? walked :fork-b)) "out-of-subset branch HEAD not shipped")
@@ -275,3 +275,37 @@
       (is (clojure.set/subset? a-only walked) "in-subset fork's own nodes shipped")
       (is (empty? (clojure.set/intersection b-only walked))
           "out-of-subset fork's own nodes NOT shipped"))))
+
+(deftest test-walk-emits-pointer-cells-last
+  (testing "walk order: index nodes first, MUTABLE pointer cells last"
+    (let [cfg {:store {:backend :file
+                       :id (java.util.UUID/randomUUID)
+                       :path test-dir}
+               :schema-flexibility :write
+               :keep-history? false}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data (vec (for [i (range 500)]
+                                              {:name (str "n" i) :age (mod i 60)}))})
+          store (-> conn d/db :store)
+          ks (<!! (walker/datahike-walk-fn store {}))]
+
+      (is (vector? ks) "walk returns an ordered vector, not a set")
+      (is (= (count ks) (count (distinct ks))) "and it is deduped")
+
+      ;; the invariant the sync relies on: a subscriber applies keys in this order, so a
+      ;; branch HEAD is only ever written after every node it references. Nothing
+      ;; downstream needs to infer that from the shape of the key.
+      (let [last-node    (->> ks (keep-indexed #(when (uuid? %2) %1)) (reduce max -1))
+            first-cell   (->> ks (keep-indexed #(when (keyword? %2) %1)) (reduce min Long/MAX_VALUE))]
+        (is (pos? (inc last-node)) "there are index nodes to order")
+        (is (< last-node first-cell)
+            "every index node precedes every mutable pointer cell"))
+
+      ;; and the pointers themselves are all there, at the tail
+      (let [tail (set (drop-while uuid? ks))]
+        (is (contains? tail :branches))
+        (is (contains? tail :db)))
+
+      (d/release conn))))
