@@ -60,9 +60,21 @@
 (defn- get-keys-to-sync
   "Get keys that need to be synced (server-side).
    Compares server timestamps against client timestamps.
-   Returns a channel yielding seq of {:key k :value v}."
-  [store client-timestamps {:keys [filter-fn walk-fn key-sort-fn]
-                            :or {filter-fn (constantly true)}}]
+   Returns a channel yielding seq of {:key k :value v}.
+
+   `:always-send-fn` (optional, default: never) — a predicate on the key. Matching
+   keys are sent on EVERY handshake, even when the subscriber's copy is already
+   current. Use it for the small set of MUTABLE pointer cells (e.g. datahike's
+   branch heads) that a subscriber gates on: pair it with `:key-sort-fn` so those
+   keys sort LAST, and \"pointer applied\" then means \"every value I was missing
+   has already been applied\" — a subscriber can expose its state on that signal
+   alone. Timestamp-deduping such a pointer would break the gate, because an
+   up-to-date subscriber would receive nothing to gate on. Keep the predicate
+   narrow: matching keys cost a value transfer per handshake; the bulk
+   (content-addressed, write-once values) still dedups on timestamps."
+  [store client-timestamps {:keys [filter-fn walk-fn key-sort-fn always-send-fn]
+                            :or {filter-fn (constantly true)
+                                 always-send-fn (constantly false)}}]
   (go
     (let [;; Get keys - use walk-fn if provided, otherwise k/keys
           all-key-metas (if walk-fn
@@ -90,7 +102,8 @@
                         (fn [{:keys [key last-write]}]
                           (let [client-timestamp (get client-timestamps key)]
                             (and (filter-fn key nil)
-                                 (or (nil? client-timestamp)
+                                 (or (always-send-fn key)   ;; mutable gate pointers — see docstring
+                                     (nil? client-timestamp)
                                      (pos? (compare last-write client-timestamp))))))
                         all-key-metas)
 
@@ -327,6 +340,9 @@
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
      - :walk-fn (fn [store opts] -> channel) - Custom key discovery
      - :key-sort-fn (fn [key] -> comparable) - Sort keys for sync order
+     - :always-send-fn (fn [key] -> bool) - Keys re-sent on EVERY handshake, even
+       when the subscriber is current. For the mutable pointer cells a subscriber
+       gates on; combine with :key-sort-fn so they sort last. Default: never.
      - :batch-size - Items per batch during handshake (default 20)
      - :item-timeout-ms - Timeout waiting for next item (default 10000 for walk-fn)
 

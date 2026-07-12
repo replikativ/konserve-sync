@@ -242,6 +242,35 @@
       ;; Client should have server-only key
       (is (= "exclusive" (<?? S (k/get *client-store* :server-only)))))))
 
+(deftest always-send-fn-test
+  (testing "always-send-fn keys are re-sent on handshake even when the subscriber is current"
+    (with-store-peers
+      ;; Server writes both keys first...
+      (<?? S (k/assoc *server-store* :node-a "content"))
+      (<?? S (k/assoc *server-store* :head "pointer"))
+      (<?? S (timeout 100))
+      ;; ...then the client writes the SAME values, so its timestamps are NEWER:
+      ;; both keys look "current" to the differential sync and would normally be skipped.
+      (<?? S (k/assoc *client-store* :node-a "content"))
+      (<?? S (k/assoc *client-store* :head "pointer"))
+
+      ;; :head is a mutable gate pointer — always re-send it, sorted last.
+      (kp/register-store! *server-peer* :gated-store *server-store*
+                          {:always-send-fn #(= % :head)
+                           :key-sort-fn (fn [k] (if (= k :head) 1 0))})
+
+      (let [applied (atom [])]
+        (<?? S (kp/subscribe-store! *client-peer* :gated-store *client-store*
+                                    {:on-key-update (fn [k _v _op] (swap! applied conj k))}))
+        (<?? S (timeout 800))
+
+        ;; The gate pointer arrives even though the client was already current...
+        (is (some #{:head} @applied)
+            "always-send-fn key is re-sent to an up-to-date subscriber")
+        ;; ...while an ordinary current key is still deduped away.
+        (is (not (some #{:node-a} @applied))
+            "ordinary current key is still skipped by differential sync")))))
+
 (deftest filter-fn-integration-test
   (testing "Filter function excludes keys from sync"
     (with-store-peers
