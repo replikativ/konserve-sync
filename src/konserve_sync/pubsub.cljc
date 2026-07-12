@@ -244,16 +244,17 @@
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
      - :walk-fn (fn [store opts] -> channel) - Custom key discovery
-     - :key-sort-fn (fn [key] -> comparable) - Impose a sync order on an UNORDERED
-       source, so a mutable pointer lands after the values it references (sort it
-       last). Needed for the HANDSHAKE, whose key list comes from :walk-fn as a SET
-       of reachable keys — there is no order to carry, and a subscriber that
-       persisted a pointer before its values would be left holding a dangling
-       pointer if the sync were interrupted.
-       NOT needed for ongoing multi-assoc publishes: an ordered batch (a seq of
-       [k v] pairs, per konserve's multi-assoc contract) already carries its apply
-       order from the writer and is relayed verbatim; only a map batch falls back
-       to this. It is a heuristic on key shape — prefer carrying real order."
+     - :key-sort-fn (fn [key] -> comparable) - LEGACY escape hatch: impose a sync
+       order on a source that carries none, so a mutable pointer lands after the
+       values it references (sort it last). It is a heuristic on the SHAPE of the
+       key, and silently wrong for any store whose keys don't fit the guess —
+       prefer carrying real order, and leave this nil:
+         * HANDSHAKE — have :walk-fn return an ORDERED seq with the mutable
+           pointer cells last (walk order is preserved). konserve-sync's datahike
+           walker does exactly that.
+         * ONGOING publishes — hand konserve's multi-assoc an ORDERED batch (a seq
+           of [k v] pairs); it is relayed verbatim, pointer last. Only a MAP batch,
+           which has no order to carry, still falls back to this."
   [store opts]
   (->StoreSyncStrategy store opts :server))
 
@@ -348,16 +349,17 @@
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
      - :walk-fn (fn [store opts] -> channel) - Custom key discovery
-     - :key-sort-fn (fn [key] -> comparable) - Impose a sync order on an UNORDERED
-       source, so a mutable pointer lands after the values it references (sort it
-       last). Needed for the HANDSHAKE, whose key list comes from :walk-fn as a SET
-       of reachable keys — there is no order to carry, and a subscriber that
-       persisted a pointer before its values would be left holding a dangling
-       pointer if the sync were interrupted.
-       NOT needed for ongoing multi-assoc publishes: an ordered batch (a seq of
-       [k v] pairs, per konserve's multi-assoc contract) already carries its apply
-       order from the writer and is relayed verbatim; only a map batch falls back
-       to this. It is a heuristic on key shape — prefer carrying real order.
+     - :key-sort-fn (fn [key] -> comparable) - LEGACY escape hatch: impose a sync
+       order on a source that carries none, so a mutable pointer lands after the
+       values it references (sort it last). It is a heuristic on the SHAPE of the
+       key, and silently wrong for any store whose keys don't fit the guess —
+       prefer carrying real order, and leave this nil:
+         * HANDSHAKE — have :walk-fn return an ORDERED seq with the mutable
+           pointer cells last (walk order is preserved). konserve-sync's datahike
+           walker does exactly that.
+         * ONGOING publishes — hand konserve's multi-assoc an ORDERED batch (a seq
+           of [k v] pairs); it is relayed verbatim, pointer last. Only a MAP batch,
+           which has no order to carry, still falls back to this.
      - :batch-size - Items per batch during handshake (default 20)
      - :item-timeout-ms - Timeout waiting for next item (default 10000 for walk-fn)
 
