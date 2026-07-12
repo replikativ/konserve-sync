@@ -242,6 +242,31 @@
       ;; Client should have server-only key
       (is (= "exclusive" (<?? S (k/get *client-store* :server-only)))))))
 
+(deftest ordered-multi-assoc-relay-test
+  (testing "an ordered multi-assoc batch is relayed in the writer's order — no key-sort-fn"
+    (with-store-peers
+      ;; NOTE: no :key-sort-fn. The order must come from the BATCH, carried from the
+      ;; writer, not reconstructed by guessing at key shape.
+      (kp/register-store! *server-peer* :ord-store *server-store* {})
+
+      (let [applied (atom [])]
+        (<?? S (kp/subscribe-store! *client-peer* :ord-store *client-store*
+                                    {:on-key-update (fn [k _v _op] (swap! applied conj k))}))
+        (<?? S (timeout 500))
+        (reset! applied [])                       ;; ignore whatever the handshake applied
+
+        ;; write-the-leaves-then-flip-the-root: the mutable pointer goes LAST
+        (<?? S (k/multi-assoc *server-store*
+                              [[:node-a 1] [:node-b 2] [:root {:refs [:node-a :node-b]}]]))
+        (<?? S (timeout 800))
+
+        (is (= [:node-a :node-b :root] @applied)
+            "subscriber applied the batch in the writer's order, pointer last")
+        ;; and the pointer's referents are present by the time it lands
+        (is (= 1 (<?? S (k/get *client-store* :node-a))))
+        (is (= 2 (<?? S (k/get *client-store* :node-b))))
+        (is (= {:refs [:node-a :node-b]} (<?? S (k/get *client-store* :root))))))))
+
 (deftest filter-fn-integration-test
   (testing "Filter function excludes keys from sync"
     (with-store-peers
@@ -349,3 +374,19 @@
       ;; Client should NOT have received updates
       (is (= "initial" (<?? S (k/get *client-store* :key1))))
       (is (nil? (<?? S (k/get *client-store* :key2)))))))
+
+(deftest sequential-publish-order-test
+  (testing "successive single-key publishes are relayed in call order"
+    (with-store-peers
+      (kp/register-store! *server-peer* :probe-store *server-store* {})
+      (let [applied (atom [])]
+        (<?? S (kp/subscribe-store! *client-peer* :probe-store *client-store*
+                                    {:on-key-update (fn [k _v _op] (swap! applied conj k))}))
+        (<?? S (timeout 500))
+        (reset! applied [])
+        (<?? S (k/assoc *server-store* :s1 1))
+        (<?? S (k/assoc *server-store* :s2 2))
+        (<?? S (k/assoc *server-store* :s3 3))
+        (<?? S (timeout 800))
+        (is (= [:s1 :s2 :s3] @applied)
+            "successive assocs arrive in call order")))))

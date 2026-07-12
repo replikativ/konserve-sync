@@ -6,7 +6,7 @@
   org.replikativ/hasch {:mvn/version "0.3.96"}
   org.replikativ/superv.async {:mvn/version "0.3.50"}
   com.taoensso/trove {:mvn/version "1.1.0"}
-  org.replikativ/kabel {:mvn/version "0.3.93"}}
+  org.replikativ/kabel {:mvn/version "0.3.100"}}
 
  :aliases
  {:dev
