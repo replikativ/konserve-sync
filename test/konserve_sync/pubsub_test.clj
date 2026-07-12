@@ -267,6 +267,41 @@
         (is (= 2 (<?? S (k/get *client-store* :node-b))))
         (is (= {:refs [:node-a :node-b]} (<?? S (k/get *client-store* :root))))))))
 
+(deftest always-send-mutable-test
+  (testing "mutable cells are re-sent even when the subscriber's copy looks newer"
+    (with-store-peers
+      ;; Server writes an IMMUTABLE node and a MUTABLE pointer at it.
+      (<?? S (k/assoc *server-store* :node-1 {:v 1} {:immutable? true} {:sync? false}))
+      (<?? S (k/assoc *server-store* :head {:points-at :node-1}))
+      (<?? S (timeout 50))
+
+      ;; The subscriber already holds both — and wrote its copies LATER than the server
+      ;; wrote its own (exactly what happens when a peer pre-fills its cache from the
+      ;; backing store before subscribing, or simply has a fast clock). The timestamp
+      ;; filter therefore reads "already current" for BOTH keys.
+      (<?? S (k/assoc *client-store* :node-1 {:v 1} {:immutable? true} {:sync? false}))
+      (<?? S (k/assoc *client-store* :head {:points-at :node-1}))
+
+      ;; …meanwhile the server has moved the pointer on.
+      (<?? S (k/assoc *server-store* :head {:points-at :node-1 :moved true}))
+      ;; (deliberately NOT waiting — the subscriber's local write may still be the later
+      ;; wall-clock time, which is the whole point: time cannot answer "which version?")
+
+      (kp/register-store! *server-peer* :mut-store *server-store*
+                          {:always-send-mutable? true})
+
+      (let [applied (atom [])]
+        (<?? S (kp/subscribe-store! *client-peer* :mut-store *client-store*
+                                    {:on-key-update (fn [k _v _op] (swap! applied conj k))}))
+        (<?? S (timeout 800))
+
+        (is (some #{:head} @applied)
+            "the MUTABLE cell is re-sent regardless of the timestamp comparison")
+        (is (not (some #{:node-1} @applied))
+            "the IMMUTABLE value the subscriber already holds is still deduped away")
+        (is (= {:points-at :node-1 :moved true} (<?? S (k/get *client-store* :head)))
+            "so the subscriber ends on the server's CURRENT pointer, not its stale one")))))
+
 (deftest filter-fn-integration-test
   (testing "Filter function excludes keys from sync"
     (with-store-peers
