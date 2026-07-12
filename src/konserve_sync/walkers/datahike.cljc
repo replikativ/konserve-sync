@@ -17,21 +17,37 @@
                 :cljs [[clojure.core.async :refer [<!]]]))
   #?(:cljs (:require-macros [clojure.core.async :refer [go]]
                             [superv.async :refer [go-try- <?-]]))
-  #?(:clj (:import [org.replikativ.persistent_sorted_set PersistentSortedSet])))
+  #?(:clj (:import [org.replikativ.persistent_sorted_set PersistentSortedSet Branch])))
 
 ;; ============================================================================
 ;; BTSet Address Collection (Recursive)
 ;; ============================================================================
 
+#?(:clj
+   (def ^:private branch->addresses
+     "Child-address accessor for the persistent-sorted-set `Branch` on the
+      classpath, resolved ONCE. Two incompatible layouts are in the wild:
+      newer versions pack node state in `_state` and expose a public
+      `.addressArray` method; older versions hold a private `_addresses` field.
+      konserve-sync is consumed at both, so we detect which is present and bind
+      the right accessor. Resolved eagerly (a `delay`) rather than per node so
+      the hot walk path does no reflection, and a genuinely absent accessor
+      throws loudly at first use instead of being swallowed as a leaf — the
+      silent-`catch` version of this masked a full sync-truncation regression."
+     (delay
+       (if (some #(= "addressArray" (.getName ^java.lang.reflect.Method %))
+                 (.getMethods Branch))
+         (fn [node] (.addressArray ^Branch node))
+         (let [f (doto (.getDeclaredField Branch "_addresses") (.setAccessible true))]
+           (fn [node] (.get f node)))))))
+
 (defn- get-node-addresses
-  "Get addresses array from a BTSet node (branch nodes only).
-   Returns nil for leaf nodes."
+  "Get the child-address array from a BTSet BRANCH node; nil for leaves.
+   Branch/leaf is an explicit `instance?` test (no catch); the branch accessor
+   is version-resolved by `branch->addresses`."
   [node]
-  #?(:clj (try
-            ;; Branch nodes have _addresses field
-            (when-let [addresses (.-_addresses node)]
-              addresses)
-            (catch Exception _ nil))
+  #?(:clj (when (instance? Branch node)
+            (@branch->addresses node))
      :cljs (.-addresses node)))
 
 (defn- walk-node-async

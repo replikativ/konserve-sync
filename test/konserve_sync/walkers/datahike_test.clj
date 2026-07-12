@@ -163,6 +163,42 @@
             (is (< last-uuid-idx first-kw-idx)
                 "every content block sorts before every branch-pointer keyword")))))))
 
+(deftest test-walk-covers-multi-level-tree
+  ;; The tests above transact a handful of datoms — a single leaf per index, so
+  ;; branch-node recursion is NEVER exercised. This one transacts enough to force
+  ;; a multi-level BTSet (a root BRANCH with leaf children). Regression guard:
+  ;; a walk that fails to descend into branches (e.g. reading a persistent-
+  ;; sorted-set field the library later renamed and swallowing the error) ships
+  ;; only the roots, so a subscriber's replica points at index roots whose child
+  ;; nodes it never received — the db is visible but not backed by its indices.
+  (testing "walk of a multi-level index is closed under child reachability"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? false}
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          ;; >512 datoms per index forces at least one branch level
+          _ (d/transact conn {:tx-data (mapv (fn [i] {:name (str "e" i) :age i})
+                                             (range 1500))})
+          store (-> conn d/db :store)
+          reachable (<!! (walker/datahike-walk-fn store {}))]
+
+      (is (> (count (filter uuid? reachable)) 8)
+          "walk must descend past the index roots into leaf nodes")
+
+      ;; Closure: every child address of every reachable BRANCH must itself be in
+      ;; the walk set. Under the truncation bug the roots' children are absent,
+      ;; so this fails; a correct recursive walk is closed. Uses the walker's own
+      ;; version-resolved accessor so the check holds across pss layouts.
+      (doseq [k reachable :when (uuid? k)]
+        (let [node (<!! (k/get store k))]
+          (doseq [addr (remove nil? (seq (#'walker/get-node-addresses node)))]
+            (is (contains? reachable addr)
+                (str "branch " k " child " addr " missing from walk")))))
+
+      (d/release conn))))
+
 (deftest test-walk-branch-scope
   (testing ":branches opt scopes which branches' HEADs + nodes are walked;
             :branches set is always emitted"
