@@ -244,7 +244,16 @@
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
      - :walk-fn (fn [store opts] -> channel) - Custom key discovery
-     - :key-sort-fn (fn [key] -> comparable) - Sort keys for sync order"
+     - :key-sort-fn (fn [key] -> comparable) - Impose a sync order on an UNORDERED
+       source, so a mutable pointer lands after the values it references (sort it
+       last). Needed for the HANDSHAKE, whose key list comes from :walk-fn as a SET
+       of reachable keys — there is no order to carry, and a subscriber that
+       persisted a pointer before its values would be left holding a dangling
+       pointer if the sync were interrupted.
+       NOT needed for ongoing multi-assoc publishes: an ordered batch (a seq of
+       [k v] pairs, per konserve's multi-assoc contract) already carries its apply
+       order from the writer and is relayed verbatim; only a map batch falls back
+       to this. It is a heuristic on key shape — prefer carrying real order."
   [store opts]
   (->StoreSyncStrategy store opts :server))
 
@@ -286,21 +295,34 @@
                          :data {:key key :topic topic :subscribers (count subscribers)}})
             (pubsub/publish! peer topic {:key key :operation :dissoc}))
 
-          ;; Multi-key operation - sort keys to ensure proper ordering
-          ;; (e.g., index nodes before :db for Datahike)
+          ;; Multi-key batch. An ORDERED batch (a seq of [k v] pairs) already CARRIES its
+          ;; apply order: konserve's multi-assoc contract makes sequence order the apply
+          ;; order, and a writer puts the mutable pointer LAST (write-the-leaves-then-
+          ;; flip-the-root). Relay it VERBATIM, so a subscriber applies the batch in the
+          ;; order the writer committed it and the pointer lands only after everything it
+          ;; references. That is a causal guarantee carried from the source.
+          ;;
+          ;; A MAP batch has no order, so there is nothing to carry: key-sort-fn imposes
+          ;; one after the fact, by guessing from the shape of the key (e.g. "keywords are
+          ;; roots, sort them last"). That is a heuristic — it is silently wrong for any
+          ;; store whose keys don't fit the guess — and it is kept only for map batches and
+          ;; legacy callers. Prefer an ordered batch.
           :multi-assoc
-          (let [sorted-kvs (cond->> kvs
-                             key-sort-fn (sort-by (fn [[k _]] (key-sort-fn k))))]
+          (let [ordered-kvs (if (map? kvs)
+                              (cond->> kvs
+                                key-sort-fn (sort-by (fn [[k _]] (key-sort-fn k))))
+                              kvs)]
             (log/debug! {:id ::write-hook-multi-assoc
                          :msg "Publishing multi-assoc"
-                         :data {:key-count (count sorted-kvs)
+                         :data {:key-count (count ordered-kvs)
+                                :ordered? (not (map? kvs))
                                 :topic topic
                                 :subscribers (count subscribers)
-                                :keys (mapv first sorted-kvs)}})
+                                :keys (mapv first ordered-kvs)}})
             ;; per-key meta is a pure-data map {key -> meta} (e.g. mark nodes immutable but
             ;; the batch's mutable branch-head pointer not); look it up per key.
             (let [m (:meta event)]
-              (doseq [[k v] sorted-kvs]
+              (doseq [[k v] ordered-kvs]
                 (when (filter-fn k v)
                   (let [km (get m k)]
                     (pubsub/publish! peer topic (cond-> {:key k :value v :operation :assoc}
@@ -326,7 +348,16 @@
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
      - :walk-fn (fn [store opts] -> channel) - Custom key discovery
-     - :key-sort-fn (fn [key] -> comparable) - Sort keys for sync order
+     - :key-sort-fn (fn [key] -> comparable) - Impose a sync order on an UNORDERED
+       source, so a mutable pointer lands after the values it references (sort it
+       last). Needed for the HANDSHAKE, whose key list comes from :walk-fn as a SET
+       of reachable keys — there is no order to carry, and a subscriber that
+       persisted a pointer before its values would be left holding a dangling
+       pointer if the sync were interrupted.
+       NOT needed for ongoing multi-assoc publishes: an ordered batch (a seq of
+       [k v] pairs, per konserve's multi-assoc contract) already carries its apply
+       order from the writer and is relayed verbatim; only a map batch falls back
+       to this. It is a heuristic on key shape — prefer carrying real order.
      - :batch-size - Items per batch during handshake (default 20)
      - :item-timeout-ms - Timeout waiting for next item (default 10000 for walk-fn)
 
