@@ -60,8 +60,31 @@
 (defn- get-keys-to-sync
   "Get keys that need to be synced (server-side).
    Compares server timestamps against client timestamps.
-   Returns a channel yielding seq of {:key k :value v}."
-  [store client-timestamps {:keys [filter-fn walk-fn key-sort-fn]
+   Returns a channel yielding seq of {:key k :value v}.
+
+   `:always-send-mutable?` (default false) — send every walked key that is NOT marked
+   `:immutable?` in its stored metadata, regardless of timestamps.
+
+   Why: the timestamp filter asks \"does the subscriber hold the CURRENT version?\" but
+   `:last-write` only records WHEN each side wrote its own copy — on its own wall clock.
+   Those are different questions, and comparing them across two machines is not sound.
+
+   For an IMMUTABLE (content-addressed, write-once) value it does not matter: the key
+   determines the value, so mere PRESENCE settles it (`nil? client-timestamp` ⇒ send),
+   and the timestamp comparison is redundant.
+
+   For a MUTABLE cell — same key, new value on every write — it is the wrong tool
+   entirely. A subscriber that rewrites its local copy stamps its own `now`, which is
+   LATER than the writer's commit, so the server concludes \"already current\" and skips
+   the cell. It also skips it whenever the subscriber's clock merely runs ahead, leaving
+   the subscriber on a stale value indefinitely.
+
+   With this flag, mutable cells are always re-sent. Combined with a `:walk-fn` that
+   emits them LAST, a subscriber is guaranteed to receive the pointer AFTER every value
+   it references — on every handshake, not just when a clock comparison happens to say
+   so. The cost is bounded: one small value per mutable cell per handshake, while the
+   bulk (content-addressed nodes) still dedups."
+  [store client-timestamps {:keys [filter-fn walk-fn key-sort-fn always-send-mutable?]
                             :or {filter-fn (constantly true)}}]
   (go
     (let [;; Get keys - use walk-fn if provided, otherwise k/keys
@@ -87,11 +110,17 @@
 
           ;; Filter to keys that need syncing
           keys-to-send (filter
-                        (fn [{:keys [key last-write]}]
+                        (fn [{:keys [key last-write immutable?]}]
                           (let [client-timestamp (get client-timestamps key)]
                             (and (filter-fn key nil)
-                                 (or (nil? client-timestamp)
-                                     (pos? (compare last-write client-timestamp))))))
+                                 (or ;; subscriber does not have it at all
+                                  (nil? client-timestamp)
+                                     ;; MUTABLE cell — a timestamp cannot tell us whether the
+                                     ;; subscriber's copy is the current VERSION, so never
+                                     ;; dedup it away. See the docstring.
+                                  (and always-send-mutable? (not immutable?))
+                                     ;; otherwise fall back to the timestamp comparison
+                                  (pos? (compare last-write client-timestamp))))))
                         all-key-metas)
 
           ;; Sort if key-sort-fn provided
@@ -244,6 +273,17 @@
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
      - :walk-fn (fn [store opts] -> channel) - Custom key discovery
+     - :always-send-mutable? (bool, default false) - Re-send every walked key NOT
+       marked :immutable? in its stored metadata, regardless of timestamps. The
+       timestamp filter asks whether you hold the current VERSION, but :last-write only
+       says WHEN each side wrote its own copy, on its own wall clock. That settles
+       nothing for a MUTABLE cell (same key, new value each write): a subscriber that
+       rewrote its copy stamps a LATER time than the writer's commit, so the server
+       skips the cell — and it also skips it whenever the subscriber's clock merely
+       runs ahead, stranding it on a stale value. Immutable (content-addressed) values
+       are unaffected: the key determines the value, so presence settles it. Pair with
+       a :walk-fn that emits mutable cells LAST, and a subscriber always receives the
+       pointer after every value it references.
      - :key-sort-fn (fn [key] -> comparable) - LEGACY escape hatch: impose a sync
        order on a source that carries none, so a mutable pointer lands after the
        values it references (sort it last). It is a heuristic on the SHAPE of the
@@ -349,6 +389,17 @@
    - opts: Options map
      - :filter-fn (fn [key value] -> bool) - Filter which keys to sync
      - :walk-fn (fn [store opts] -> channel) - Custom key discovery
+     - :always-send-mutable? (bool, default false) - Re-send every walked key NOT
+       marked :immutable? in its stored metadata, regardless of timestamps. The
+       timestamp filter asks whether you hold the current VERSION, but :last-write only
+       says WHEN each side wrote its own copy, on its own wall clock. That settles
+       nothing for a MUTABLE cell (same key, new value each write): a subscriber that
+       rewrote its copy stamps a LATER time than the writer's commit, so the server
+       skips the cell — and it also skips it whenever the subscriber's clock merely
+       runs ahead, stranding it on a stale value. Immutable (content-addressed) values
+       are unaffected: the key determines the value, so presence settles it. Pair with
+       a :walk-fn that emits mutable cells LAST, and a subscriber always receives the
+       pointer after every value it references.
      - :key-sort-fn (fn [key] -> comparable) - LEGACY escape hatch: impose a sync
        order on a source that carries none, so a mutable pointer lands after the
        values it references (sort it last). It is a heuristic on the SHAPE of the
