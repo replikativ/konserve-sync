@@ -16,7 +16,7 @@
   {:extra-paths ["test"]
    :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
                 ;; Optional dep for datahike walker tests (includes persistent-sorted-set)
-                org.replikativ/datahike {:mvn/version "0.8.1701"}}
+                org.replikativ/datahike {:mvn/version "0.8.1729"}}
    :main-opts ["-m" "kaocha.runner"]}
 
   :cljs-test

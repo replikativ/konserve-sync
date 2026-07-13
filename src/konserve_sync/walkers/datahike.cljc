@@ -89,16 +89,31 @@
 
 (defn- collect-btset-addresses-async
   "Collect all addresses from a BTSet by walking the tree.
-   Fetches nodes from the store to discover all nested addresses."
-  [store btset]
+   Fetches nodes from the store to discover all nested addresses.
+
+   `fused-root` is the index's root NODE inlined in the db record, present iff the
+   store runs datahike's `:fuse-index-roots?`. It is load-bearing: under fusion the
+   root is inlined and NEVER written as its own konserve object, so `(k/get store
+   root-addr)` returns nil, `walk-node-async` walks nothing, and the walk dead-ends
+   at the root — shipping a root address that does not exist in the store while
+   discovering none of the subtree. (That is a silent under-report: a fresh
+   subscriber then syncs ~nothing and read-throughs to the backend forever.)
+
+   So when the root is fused we walk the INLINED node directly and do not emit its
+   address — there is no object to sync. The root's CHILDREN are still ordinary
+   content-addressed objects, so the rest of the tree is discovered as usual.
+   Datahike's GC does exactly this (it seeds the inlined root before marking); the
+   sync walker has to as well or the two disagree about what is reachable."
+  [store btset fused-root]
   (go-try-
    (let [collected (atom #{})
          root-addr (get-btset-address btset)]
-     (when root-addr
-       (swap! collected conj root-addr)
-        ;; Fetch root node and walk its children
-       (let [root-node (<?- (k/get store root-addr))]
-         (<?- (walk-node-async store root-node collected))))
+     (cond
+       fused-root (<?- (walk-node-async store fused-root collected))
+
+       root-addr  (do (swap! collected conj root-addr)
+                      (let [root-node (<?- (k/get store root-addr))]
+                        (<?- (walk-node-async store root-node collected)))))
      @collected)))
 
 ;; ============================================================================
@@ -114,15 +129,23 @@
   (go-try-
    (let [collected (atom #{})]
      (when stored-db
-       ;; Main indices
-       (doseq [idx-key [:eavt-key :aevt-key :avet-key]]
+       ;; Main indices. The `*-root` keys carry the INLINED root node under
+       ;; datahike's :fuse-index-roots? (absent otherwise) — see
+       ;; collect-btset-addresses-async for why passing it is not optional.
+       (doseq [[idx-key root-key] [[:eavt-key :eavt-root]
+                                   [:aevt-key :aevt-root]
+                                   [:avet-key :avet-root]]]
          (when-let [btset (get stored-db idx-key)]
-           (let [addrs (<?- (collect-btset-addresses-async store btset))]
+           (let [addrs (<?- (collect-btset-addresses-async
+                             store btset (get stored-db root-key)))]
              (swap! collected into addrs))))
        ;; Temporal indices (when :keep-history?)
-       (doseq [idx-key [:temporal-eavt-key :temporal-aevt-key :temporal-avet-key]]
+       (doseq [[idx-key root-key] [[:temporal-eavt-key :temporal-eavt-root]
+                                   [:temporal-aevt-key :temporal-aevt-root]
+                                   [:temporal-avet-key :temporal-avet-root]]]
          (when-let [btset (get stored-db idx-key)]
-           (let [addrs (<?- (collect-btset-addresses-async store btset))]
+           (let [addrs (<?- (collect-btset-addresses-async
+                             store btset (get stored-db root-key)))]
              (swap! collected into addrs))))
        ;; Schema meta
        (when-let [schema-key (get stored-db :schema-meta-key)]

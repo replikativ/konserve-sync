@@ -199,6 +199,54 @@
 
       (d/release conn))))
 
+(deftest test-walk-covers-fused-index-roots
+  ;; Regression: with datahike's `:fuse-index-roots? true` the index ROOT node is
+  ;; inlined into the db record and NEVER written as its own konserve object. The
+  ;; walker fetched each root by address — `(k/get store root-addr)` → nil — so it
+  ;; dead-ended AT the root: it emitted a root address that does not exist in the
+  ;; store and discovered none of the subtree below it.
+  ;;
+  ;; Effect: a subscriber syncing a fused store received ~nothing (a handful of
+  ;; keys, two of them dangling) and read-through'd to the backend forever. Silent
+  ;; — the head still applied, queries still worked, they were just never local.
+  ;; Datahike's own GC handles fusion by seeding the inlined root before marking;
+  ;; this walker has to agree with it about what is reachable, or sync and GC
+  ;; disagree.
+  ;;
+  ;; The multi-level test above does NOT catch this: it leaves fusion off.
+  (testing "walk descends through an INLINED root and emits no dangling addresses"
+    (let [cfg {:store {:backend :file :id (java.util.UUID/randomUUID) :path test-dir}
+               :schema-flexibility :write
+               :keep-history? false
+               :fuse-index-roots? true}          ;; <- the whole point
+          _ (d/create-database cfg)
+          conn (d/connect cfg)
+          _ (d/transact conn {:tx-data test-schema})
+          _ (d/transact conn {:tx-data (mapv (fn [i] {:name (str "e" i) :age i})
+                                             (range 1500))})
+          store (-> conn d/db :store)
+          reachable (set (<!! (walker/datahike-walk-fn store {})))
+          node-keys (filter uuid? reachable)]
+
+      (is (> (count node-keys) 8)
+          "walk must descend past the INLINED root into the child nodes")
+
+      ;; Every address the walk emits must exist. Under the bug the fused root's
+      ;; address was emitted while no such object was ever written — a subscriber
+      ;; asks for it and gets nothing.
+      (doseq [k node-keys]
+        (is (some? (<!! (k/get store k)))
+            (str "walk emitted " k " but no such object exists in the store")))
+
+      ;; Closure, as in the unfused case.
+      (doseq [k node-keys]
+        (let [node (<!! (k/get store k))]
+          (doseq [addr (remove nil? (seq (#'walker/get-node-addresses node)))]
+            (is (contains? reachable addr)
+                (str "branch " k " child " addr " missing from walk")))))
+
+      (d/release conn))))
+
 (deftest test-walk-branch-scope
   (testing ":branches opt scopes which branches' HEADs + nodes are walked;
             :branches set is always emitted"
