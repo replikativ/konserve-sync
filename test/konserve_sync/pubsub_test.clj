@@ -25,6 +25,11 @@
 (defn unique-port []
   (+ 47500 (rand-int 100)))
 
+(defn- stored-bytes [store key]
+  (<?? S (k/bget store key
+                 (fn [{:keys [input-stream]}]
+                   (go input-stream)))))
+
 (defmacro with-store-peers
   "Execute body with server and client peers set up with konserve stores."
   [& body]
@@ -176,6 +181,24 @@
       (is (= "value1" (<?? S (k/get *client-store* :key1))))
       (is (= {:nested "data"} (<?? S (k/get *client-store* :key2))))
       (is (= [1 2 3] (<?? S (k/get *client-store* :key3)))))))
+
+(deftest binary-store-sync-integration-test
+  (testing "binary values use bassoc during handshake and incremental sync"
+    (with-store-peers
+      (let [initial (byte-array (map unchecked-byte (range 64)))
+            incremental (byte-array (map unchecked-byte (range 127 -1 -1)))]
+        (<?? S (k/bassoc *server-store* :initial-blob initial))
+        (kp/register-store! *server-peer* :binary-store *server-store* {})
+        (<?? S (kp/subscribe-store! *client-peer* :binary-store *client-store* {}))
+        (<?? S (timeout 800))
+
+        (is (= (seq initial) (seq (stored-bytes *client-store* :initial-blob))))
+        (is (= :binary (:type (<?? S (k/get-meta *client-store* :initial-blob)))))
+
+        (<?? S (k/bassoc *server-store* :new-blob incremental))
+        (<?? S (timeout 500))
+        (is (= (seq incremental) (seq (stored-bytes *client-store* :new-blob))))
+        (is (= :binary (:type (<?? S (k/get-meta *client-store* :new-blob)))))))))
 
 (deftest incremental-store-sync-test
   (testing "Incremental updates via pubsub after initial sync"

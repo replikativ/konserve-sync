@@ -33,9 +33,12 @@
   (:require #?(:clj [clojure.core.async :as async :refer [go go-loop chan put! close! <! >!]]
                :cljs [clojure.core.async :as async :refer [chan put! close!] :refer-macros [go go-loop]])
             [konserve.core :as k]
+            [hasch.base64 :as base64]
             [kabel.pubsub :as pubsub]
             [kabel.pubsub.protocol :as proto]
-            [konserve-sync.log :as log]))
+            [konserve-sync.log :as log]
+            #?(:clj [clojure.java.io :as io]))
+  #?(:clj (:import [java.io ByteArrayOutputStream InputStream])))
 
 ;; =============================================================================
 ;; Store Sync Strategy
@@ -45,6 +48,71 @@
            [store        ; The konserve store (local on client, source on server)
             opts         ; {:filter-fn, :walk-fn, :key-sort-fn, :on-key-update}
             role])       ; :server or :client
+
+#?(:clj
+   (defn- binary-bytes [{:keys [input-stream blob] :as binary}]
+     (cond
+       (bytes? binary) binary
+       (bytes? input-stream) input-stream
+       (instance? InputStream input-stream)
+       (let [out (ByteArrayOutputStream.)]
+         (io/copy input-stream out)
+         (.toByteArray out))
+       (bytes? blob) blob
+       :else (throw (ex-info "Unsupported JVM binary representation"
+                             {:value-type (type binary)})))))
+
+#?(:cljs
+   (defn- concat-binary-chunks [chunks]
+     (let [size (reduce + (map #(.-length %) chunks))
+           out (js/Uint8Array. size)]
+       (loop [offset 0 remaining (seq chunks)]
+         (if-let [chunk (first remaining)]
+           (do (.set out chunk offset)
+               (recur (+ offset (.-length chunk)) (next remaining)))
+           out)))))
+
+#?(:cljs
+   (defn- binary-channel [{:keys [input-stream blob] :as binary}]
+     (let [out (chan 1)
+           ^js value (or input-stream blob binary)]
+       (cond
+         (instance? js/Uint8Array value)
+         (put! out value)
+
+         (and value (fn? (.-arrayBuffer value)))
+         (-> (.arrayBuffer value)
+             (.then #(put! out (js/Uint8Array. %)))
+             (.catch #(put! out %)))
+
+         (and value (fn? (.-on value)))
+         (let [chunks (atom [])]
+           (.on value "data" #(swap! chunks conj %))
+           (.once value "end" #(put! out (concat-binary-chunks @chunks)))
+           (.once value "error" #(put! out %)))
+
+         :else
+         (put! out (ex-info "Unsupported CLJS binary representation"
+                            {:value-type (type value)})))
+       out)))
+
+(defn- read-binary
+  "Materialize one Konserve binary object while its bget callback is valid.
+  Geschichte keeps these objects bounded (4 MiB by default); transport-level
+  framing for arbitrary monolithic values is a separate protocol extension."
+  [store key]
+  (k/bget store key
+          (fn [binary]
+            #?(:clj (go (binary-bytes binary))
+               :cljs (binary-channel binary)))
+          {:sync? false :streaming? true}))
+
+(defn- encode-binary [value]
+  (base64/encode value))
+
+(defn- decode-binary [value]
+  #?(:clj (base64/decode value)
+     :cljs (js/Uint8Array. (base64/decode value))))
 
 (defn- get-local-key-timestamps
   "Get {key -> last-write} map from a konserve store.
@@ -103,6 +171,7 @@
                                   (recur (next remaining)
                                          (if meta
                                            (conj result {:key k :last-write (:last-write meta)
+                                                         :type (:type meta)
                                                          :immutable? (:immutable? meta)})
                                            result))))))
                           ;; Default: get all keys via k/keys
@@ -129,7 +198,9 @@
           ;; keys whose stored metadata marks them immutable (content-addressed,
           ;; write-once) — the handshake item carries this so a reconnecting peer
           ;; that already holds the value skips re-storing (and re-publishing) it.
-          immutable-keys (into #{} (comp (filter :immutable?) (map :key)) keys-to-send)]
+          immutable-keys (into #{} (comp (filter :immutable?) (map :key)) keys-to-send)
+          binary-keys (into #{} (comp (filter #(= :binary (:type %))) (map :key))
+                            keys-to-send)]
 
       (log/debug! {:id ::keys-to-sync
                    :msg "Computed keys to sync"
@@ -141,9 +212,12 @@
         (if-not remaining
           result
           (let [k (first remaining)
-                v (<! (k/get store k))]
+                binary? (contains? binary-keys k)
+                v (<! (if binary? (read-binary store k) (k/get store k)))
+                v (if binary? (encode-binary v) v)]
             (recur (next remaining)
                    (conj result (cond-> {:key k :value v}
+                                  binary? (assoc :binary? true)
                                   (immutable-keys k) (assoc :meta {:immutable? true}))))))))))
 
 (extend-type StoreSyncStrategy
@@ -184,7 +258,7 @@
         (close! ch)
         ch)))
 
-  (-apply-handshake-item [this {:keys [key value meta]}]
+  (-apply-handshake-item [this {:keys [key value meta binary?]}]
     ;; Client applies handshake item to local store
     (let [ch (chan 1)]
       (if (= :client (:role this))
@@ -194,14 +268,16 @@
               ;; immutable value already held (reconnect / overlap) — skip the
               ;; re-store so its write-hook doesn't re-publish (echo).
               (log/trace! {:id ::apply-handshake-skip-immutable :data {:key key}})
-              (do
+              (let [stored-value (if binary? (decode-binary value) value)]
                 (log/trace! {:id ::apply-handshake-item
                              :msg "Applying handshake item"
                              :data {:key key}})
-                (<! (k/assoc (:store this) key value))
+                (<! (if binary?
+                      (k/bassoc (:store this) key stored-value)
+                      (k/assoc (:store this) key stored-value)))
                 ;; Invoke callback if provided
                 (when-let [on-key-update (get-in this [:opts :on-key-update])]
-                  (on-key-update key value :handshake))))
+                  (on-key-update key stored-value :handshake))))
             (put! ch {:ok true})
             (catch #?(:clj Exception :cljs js/Error) e
               (log/error! {:id ::apply-handshake-error
@@ -215,7 +291,7 @@
           (close! ch)))
       ch))
 
-  (-apply-publish [this {:keys [key value operation meta] :as payload}]
+  (-apply-publish [this {:keys [key value operation meta binary?] :as payload}]
     ;; Apply publish to local store (both client and server can receive)
     (let [ch (chan 1)]
       (go
@@ -229,17 +305,19 @@
             ;; means "identical"). Mutable cells (roots) never reach here — they ride
             ;; the convergent δ path, not the node push.
             (log/trace! {:id ::apply-publish-skip-immutable :data {:key key}})
-            (do
+            (let [stored-value (if binary? (decode-binary value) value)]
               (case operation
                 :dissoc
                 (<! (k/dissoc (:store this) key))
 
-                ;; Default: assoc
-                (<! (k/assoc (:store this) key value)))
+                ;; Default: assoc/bassoc
+                (<! (if binary?
+                      (k/bassoc (:store this) key stored-value)
+                      (k/assoc (:store this) key stored-value))))
 
               ;; Invoke callback if provided
               (when-let [on-key-update (get-in this [:opts :on-key-update])]
-                (on-key-update key value (or operation :assoc)))))
+                (on-key-update key stored-value (or operation :assoc)))))
 
           (put! ch {:ok true})
           (catch #?(:clj Exception :cljs js/Error) e
@@ -304,7 +382,7 @@
 
 (defn- make-write-hook
   "Create a write-hook that publishes changes to pubsub."
-  [peer topic filter-fn key-sort-fn]
+  [peer topic store filter-fn key-sort-fn]
   (fn [event]
     (when-let [api-op (:api-op event)]
       (let [{:keys [key value kvs]} event
@@ -317,7 +395,7 @@
                             :subscriber-count (count subscribers)}})
         (case api-op
           ;; Single key write operations
-          (:assoc :assoc-in :update :update-in :bassoc)
+          (:assoc :assoc-in :update :update-in)
           (when (filter-fn key value)
             (log/debug! {:id ::write-hook-publish
                          :msg "Publishing single key"
@@ -327,6 +405,30 @@
             ;; has — terminating the bidirectional write-hook echo.
             (pubsub/publish! peer topic (cond-> {:key key :value value :operation :assoc}
                                           (:meta event) (assoc :meta (:meta event)))))
+
+          :bassoc
+          (when (filter-fn key value)
+            ;; Byte buffers (Geschichte chunks) remain valid after bassoc and can
+            ;; be published immediately, preserving their write-before-head order.
+            ;; Stateful inputs have been consumed by the store, so refetch them.
+            #?(:clj
+               (if (bytes? value)
+                 (pubsub/publish! peer topic
+                                  {:key key :value (encode-binary value)
+                                   :operation :assoc :binary? true})
+                 (go (let [stored (<! (read-binary store key))]
+                       (pubsub/publish! peer topic
+                                        {:key key :value (encode-binary stored) :operation :assoc
+                                         :binary? true}))))
+               :cljs
+               (if (instance? js/Uint8Array value)
+                 (pubsub/publish! peer topic
+                                  {:key key :value (encode-binary value)
+                                   :operation :assoc :binary? true})
+                 (go (let [stored (<! (read-binary store key))]
+                       (pubsub/publish! peer topic
+                                        {:key key :value (encode-binary stored) :operation :assoc
+                                         :binary? true}))))))
 
           ;; Delete
           :dissoc
@@ -451,7 +553,8 @@
 
     ;; Set up write hook for auto-publishing
     ;; Pass key-sort-fn to ensure multi-assoc keys are published in correct order
-    (k/add-write-hook! store hook-id (make-write-hook peer topic filter-fn key-sort-fn))
+    (k/add-write-hook! store hook-id
+                       (make-write-hook peer topic store filter-fn key-sort-fn))
 
     (log/debug! {:id ::register-store-hook-added
                  :msg "Write hook added"
