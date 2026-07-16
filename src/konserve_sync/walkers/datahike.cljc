@@ -1,5 +1,16 @@
 (ns konserve-sync.walkers.datahike
-  "Cross-platform walker for Datahike stores.
+  "DEPRECATED / INTERNAL — moved to datahike as `datahike.kabel.walker`.
+
+   This walker reaches into datahike's stored-db record format, so it belongs with
+   datahike and versions with it — this copy will chase datahike-internal changes
+   across a repo boundary (as the `:fuse-index-roots?` fix already had to). It also
+   walks ONLY the index trees, so it does NOT follow `:db.type/store-ref` values:
+   with it, a blob referenced by a datom never replicates and a subscriber is left
+   holding a live reference to an object it never received. The datahike copy fixes
+   that. **Prefer `datahike.kabel.walker/datahike-walk-fn`.** Retained for
+   compatibility; not guaranteed stable, and slated for removal.
+
+   Cross-platform walker for Datahike stores.
 
    Discovers all BTSet node addresses reachable from the :db root.
    This enables reachability-based sync instead of syncing ALL keys,
