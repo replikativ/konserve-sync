@@ -4,4 +4,18 @@
   {:target :node-test
    :output-to "target/test.js"
    :ns-regexp "-test$"
+   :autorun true}
+
+  ;; The boring (CBOR) transport on ClojureScript. Needs the :boring deps alias
+  ;; for test-boring/ plus the kabel and konserve branches, so run it as
+  ;;
+  ;;   npx shadow-cljs -A:boring compile boring-test
+  ;;
+  ;; Deps aliases in shadow-cljs.edn are global, which is why :boring is passed
+  ;; on the command line instead: adding it here would silently move the :test
+  ;; build onto those branches too.
+  :boring-test
+  {:target :node-test
+   :output-to "target/boring-test.js"
+   :ns-regexp "-node-test$"
    :autorun true}}}
