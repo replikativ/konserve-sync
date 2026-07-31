@@ -1,5 +1,5 @@
 #kaocha/v1
-{:tests [{:id :boring
-          :test-paths ["test-boring"]
+{:tests [{:id :cbor
+          :test-paths ["test-cbor"]
           :ns-patterns [".*-test$"]}]
  :fail-fast? false}

@@ -1,5 +1,5 @@
-(ns konserve-sync.boring-transport-test
-  "konserve-sync running over the boring (CBOR) transport, end to end.
+(ns konserve-sync.cbor-transport-test
+  "konserve-sync running over the CBOR transport, end to end.
 
   konserve-sync is serializer-agnostic by construction: `peer/server-peer` and
   `peer/client-peer` take the serialization middleware as their last argument,
@@ -8,19 +8,19 @@
 
   `identity` is not 'no serialization', though. `kabel.binary/to-binary` falls
   back to `pr-str` + `edn/read-string` when no middleware set
-  `:kabel/serialization`, which is why `records-cannot-cross-the-default-transport`
+  `:kabel/serialization`, which is why `a-record-poisons-the-default-transport`
   below is a *passing* test asserting a *failure*: the default transport cannot
-  carry a defrecord at all. That is the baseline the boring tests are measured
+  carry a defrecord at all. That is the baseline the CBOR tests are measured
   against, and it is worth having in the file rather than in a commit message.
 
-  The last test is the full vertical — boring on the wire AND konserve's boring
+  The last test is the full vertical — CBOR on the wire AND konserve's boring
   serializer (byte 3) in both stores, with the on-disk header byte asserted."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest testing is]]
             [boring.core :as boring]
             [boring.data :as bdata]
             [kabel.http-kit :as http-kit]
-            [kabel.middleware.boring :as boring-mw]
+            [kabel.middleware.cbor :as cbor-mw]
             [kabel.peer :as peer]
             [konserve.core :as k]
             [konserve.filestore :refer [connect-fs-store delete-store]]
@@ -72,8 +72,8 @@
        (finally
          (<?? S (peer/stop server)))))))
 
-(defmacro with-boring-peers [& body]
-  `(with-peers* boring-mw/boring (fn [] ~@body)))
+(defmacro with-cbor-peers [& body]
+  `(with-peers* cbor-mw/cbor (fn [] ~@body)))
 
 (defmacro with-default-peers
   "The transport konserve-sync's own docs and tests use: `identity`, which
@@ -85,20 +85,20 @@
 ;; Core sync, unchanged behaviour on a new transport
 ;; ---------------------------------------------------------------------------
 
-(deftest handshake-and-incremental-sync-over-boring
+(deftest handshake-and-incremental-sync-over-cbor
   (testing "the existing sync semantics must be identical over CBOR — the
             transport is the only thing that changed"
     (let [server-store (<?? S (new-mem-store))
           client-store (<?? S (new-mem-store))]
-      (with-boring-peers
+      (with-cbor-peers
         (<?? S (k/assoc server-store :key1 "value1"))
         (<?? S (k/assoc server-store :key2 {:nested "data"}))
         (<?? S (k/assoc server-store :key3 [1 2 3]))
         (<?? S (k/assoc server-store :key4 #{:a :b}))
         (<?? S (k/assoc server-store :doomed "will be deleted"))
 
-        (kp/register-store! *server-peer* :boring-store server-store {})
-        (<?? S (kp/subscribe-store! *client-peer* :boring-store client-store {}))
+        (kp/register-store! *server-peer* :cbor-store server-store {})
+        (<?? S (kp/subscribe-store! *client-peer* :cbor-store client-store {}))
         (<?? S (timeout 1000))
 
         (testing "handshake"
@@ -118,7 +118,7 @@
           (<?? S (timeout 400))
           (is (nil? (<?? S (k/get client-store :doomed)))))))))
 
-(deftest binary-values-survive-the-boring-transport
+(deftest binary-values-survive-the-cbor-transport
   (testing "bassoc/bget with byte equality, on the handshake path and the
             incremental path.
 
@@ -131,7 +131,7 @@
           client-store (<?? S (new-mem-store))
           initial (byte-array (map unchecked-byte (range 64)))
           incremental (byte-array (map unchecked-byte (range 127 -1 -1)))]
-      (with-boring-peers
+      (with-cbor-peers
         (<?? S (k/bassoc server-store :initial-blob initial))
         (kp/register-store! *server-peer* :bin-store server-store {})
         (<?? S (kp/subscribe-store! *client-peer* :bin-store client-store {}))
@@ -178,16 +178,16 @@
         (<?? S (timeout 600))
         (is (nil? (<?? S (k/get client-store :after)))
             "and the connection is now dead — an unrelated later key is lost
-             too. This is the collateral damage boring removes.")))))
+             too. This is the collateral damage CBOR removes.")))))
 
-(deftest records-cross-boring-without-registration
+(deftest records-cross-cbor-without-registration
   (testing "boring writes a record's type name natively via CBOR tag 27, so
             with no handler anywhere the value still arrives carrying its name
             and fields instead of being lost. That is what makes an
             unregistered record safe rather than silently destructive."
     (let [server-store (<?? S (new-mem-store))
           client-store (<?? S (new-mem-store))]
-      (with-boring-peers
+      (with-cbor-peers
         (<?? S (k/assoc server-store :rec (->WirePoint 3 4)))
         (kp/register-store! *server-peer* :rec-store server-store {})
         (<?? S (kp/subscribe-store! *client-peer* :rec-store client-store {}))
@@ -199,7 +199,7 @@
           (is (bdata/unknown-record? back)
               "it is an inert UnknownRecord, not a plain map that silently
                dropped its identity")
-          (is (= "konserve_sync.boring_transport_test.WirePoint"
+          (is (= "konserve_sync.cbor_transport_test.WirePoint"
                  (bdata/record-type back))
               "and it still knows what it was"))
 
@@ -217,13 +217,13 @@
           client-registry
           (atom (boring/register-record
                  (boring/tag-registry)
-                 "konserve_sync.boring_transport_test.WirePoint"
+                 "konserve_sync.cbor_transport_test.WirePoint"
                  map->WirePoint))
-          client-mw #(boring-mw/boring client-registry (atom {}) %)]
+          client-mw #(cbor-mw/cbor client-registry (atom {}) %)]
       ;; asymmetric on purpose: plain boring on the server, a registry on the
       ;; client.
       (with-peers*
-        boring-mw/boring client-mw
+        cbor-mw/cbor client-mw
         (fn []
           (<?? S (k/assoc server-store :rec (->WirePoint 3 4)))
           (kp/register-store! *server-peer* :rec2-store server-store {})
@@ -254,13 +254,13 @@
         (aget head 1)))))
 
 (deftest both-stores-on-the-boring-serializer
-  (testing "boring end to end: CBOR on the wire, and konserve's boring
+  (testing "end to end: CBOR on the wire, and konserve's boring
             serializer (byte 3) at rest on BOTH peers, with the on-disk header
             byte asserted rather than the serializer merely named. Memory
             stores cannot show this — `konserve.memory` implements
             `PAssocSerializers` as a no-op and keeps live objects, so it would
             pass with any serializer at all."
-    (let [base (str (System/getProperty "java.io.tmpdir") "/konserve-sync-boring")
+    (let [base (str (System/getProperty "java.io.tmpdir") "/konserve-sync-cbor")
           sdir (str base "-server")
           cdir (str base "-client")]
       (delete-store sdir)
@@ -270,7 +270,7 @@
                                    sdir :default-serializer :BoringSerializer))
               client-store (<?? S (connect-fs-store
                                    cdir :default-serializer :BoringSerializer))]
-          (with-boring-peers
+          (with-cbor-peers
             (<?? S (k/assoc server-store :cfg {:name "vertical" :n 7}))
             (<?? S (k/assoc server-store :xs (vec (range 100))))
             (kp/register-store! *server-peer* :fs-store server-store {})

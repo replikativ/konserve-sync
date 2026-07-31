@@ -23,19 +23,19 @@
   {:extra-paths ["test"]
    :extra-deps {thheller/shadow-cljs {:mvn/version "3.4.11"}}}
 
-  ;; Verification of konserve-sync over the boring (CBOR) transport. Nothing in
+  ;; Verification of konserve-sync over the CBOR transport. Nothing in
   ;; src/ changes -- konserve-sync takes the serialization middleware as an
   ;; argument -- so this is an extra test path, not a new dependency of the
   ;; library.
   ;;
-  ;; kabel and konserve are :local/root because the boring middleware (frame 14)
+  ;; kabel and konserve are :local/root because the CBOR middleware (frame 14)
   ;; and the boring serializer (byte 3) are on branches at the time of writing.
   ;; Once both are released this becomes two :mvn/version bumps and the alias
   ;; can fold into :test.
   ;;
-  ;;   clj -M:boring -m kaocha.runner --config-file tests-boring.edn
-  :boring
-  {:extra-paths ["test-boring"]
+  ;;   clj -M:cbor -m kaocha.runner --config-file tests-cbor.edn
+  :cbor
+  {:extra-paths ["test-cbor"]
    :override-deps {org.replikativ/kabel {:local/root "../kabel"}
                    org.replikativ/konserve {:local/root "../konserve"}
                    ;; ClojureScript and shadow-cljs must be a MATCHED pair: each

@@ -1,9 +1,8 @@
-(ns konserve-sync.boring-transport-node-test
-  "konserve-sync's payloads through the boring (CBOR) middleware on
-  ClojureScript.
+(ns konserve-sync.cbor-transport-node-test
+  "konserve-sync's payloads through the CBOR middleware on ClojureScript.
 
   There are no websockets here. Node has no `WebSocket` without a package, so
-  the JVM suite in `boring_transport_test.clj` owns the socket-level story and
+  the JVM suite in `cbor_transport_test.clj` owns the socket-level story and
   this file drives the middleware directly over channels — which is the part
   that actually differs by platform.
 
@@ -15,7 +14,7 @@
             [boring.core :as boring]
             [boring.data :as bdata]
             [clojure.core.async :refer [chan] :refer-macros [go]]
-            [kabel.middleware.boring :refer [boring] :rename {boring boring-mw}]
+            [kabel.middleware.cbor :refer [cbor] :rename {cbor cbor-mw}]
             [kabel.pubsub.protocol :as proto]
             [konserve.core :as k]
             [konserve.memory :refer [new-mem-store]]
@@ -27,7 +26,7 @@
 (defn- mw
   "A middleware instance over a bare channel pair. `:in`/`:out` are the wire
   side, `:tin`/`:tout` the application side."
-  ([] (mw boring-mw))
+  ([] (mw cbor-mw))
   ([make]
    (let [in (chan) out (chan)
          [_ _ [tin tout]] (make [S nil [in out]])]
@@ -36,7 +35,7 @@
 (defn- through
   "Serialize `v` on the out-branch and read it back on the in-branch of a fresh
   middleware instance, i.e. one full trip across the wire."
-  ([v] (through v boring-mw))
+  ([v] (through v cbor-mw))
   ([v make]
    (go-try S
            (let [a (mw make)
@@ -46,11 +45,11 @@
                (put? S (:in b) frame)
                [frame (<? S (:tin b))])))))
 
-(deftest frames-are-tagged-boring-with-byte-payloads
+(deftest frames-are-tagged-cbor-with-byte-payloads
   (async done
          (go
            (let [[frame back] (<? S (through {:key :k :value [1 2 3]}))]
-             (is (= :boring (:kabel/serialization frame)))
+             (is (= :cbor (:kabel/serialization frame)))
              (is (instance? js/Uint8Array (:kabel/payload frame)))
              (is (= {:key :k :value [1 2 3]} back))
              (done)))))
@@ -76,7 +75,7 @@
                (is (bdata/unknown-record? back))
                (is (= 3 (:x back)))
                (is (= 4 (:y back)))
-               (is (= "konserve_sync.boring_transport_node_test.WirePoint"
+               (is (= "konserve_sync.cbor_transport_node_test.WirePoint"
                       (bdata/record-type back)))
                (done))))))
 
@@ -89,10 +88,10 @@
            (go
              (let [reg (atom (boring/register-record
                               (boring/tag-registry)
-                              "konserve_sync.boring_transport_node_test.WirePoint"
+                              "konserve_sync.cbor_transport_node_test.WirePoint"
                               map->WirePoint))
                    sender (mw)
-                   reader (mw #(boring-mw reg (atom {}) %))]
+                   reader (mw #(cbor-mw reg (atom {}) %))]
                (put? S (:tout sender) (->WirePoint 3 4))
                (put? S (:in reader) (<? S (:out sender)))
                (let [back (<? S (:tin reader))]
