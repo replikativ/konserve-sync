@@ -46,7 +46,7 @@
                    ;; the current release.
                    org.clojure/clojurescript {:mvn/version "1.12.145"}
                    thheller/shadow-cljs {:mvn/version "3.4.11"}}
-   :extra-deps {org.replikativ/boring {:mvn/version "0.1.4"}
+   :extra-deps {org.replikativ/boring {:mvn/version "0.1.6"}
                 lambdaisland/kaocha {:mvn/version "1.91.1392"}}}
 
   :build
