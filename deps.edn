@@ -37,7 +37,7 @@
   :cbor
   {:extra-paths ["test-cbor"]
    :override-deps {org.replikativ/kabel {:local/root "../kabel"}
-                   org.replikativ/konserve {:mvn/version "0.9.364"}
+                   org.replikativ/konserve {:mvn/version "0.9.365"}
                    ;; ClojureScript and shadow-cljs must be a MATCHED pair: each
                    ;; pulls a google-closure-library, and a mismatched pair
                    ;; compiles cleanly and then dies at RUNTIME with
