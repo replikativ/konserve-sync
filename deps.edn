@@ -28,16 +28,16 @@
   ;; argument -- so this is an extra test path, not a new dependency of the
   ;; library.
   ;;
-  ;; kabel and konserve are :local/root because the CBOR middleware (frame 14)
-  ;; and the boring serializer (byte 3) are on branches at the time of writing.
-  ;; Once both are released this becomes two :mvn/version bumps and the alias
-  ;; can fold into :test.
+  ;; boring and konserve are released coordinates now -- boring 0.1.4 on
+  ;; Clojars, and konserve 0.9.364 carries the byte-3 serializer (replikativ/
+  ;; konserve#160, merged). kabel stays :local/root until its CBOR middleware
+  ;; PR (replikativ/kabel#15) lands; once it does this alias folds into :test.
   ;;
   ;;   clj -M:cbor -m kaocha.runner --config-file tests-cbor.edn
   :cbor
   {:extra-paths ["test-cbor"]
    :override-deps {org.replikativ/kabel {:local/root "../kabel"}
-                   org.replikativ/konserve {:local/root "../konserve"}
+                   org.replikativ/konserve {:mvn/version "0.9.364"}
                    ;; ClojureScript and shadow-cljs must be a MATCHED pair: each
                    ;; pulls a google-closure-library, and a mismatched pair
                    ;; compiles cleanly and then dies at RUNTIME with
@@ -46,7 +46,7 @@
                    ;; the current release.
                    org.clojure/clojurescript {:mvn/version "1.12.145"}
                    thheller/shadow-cljs {:mvn/version "3.4.11"}}
-   :extra-deps {org.replikativ/boring {:local/root "../boring"}
+   :extra-deps {org.replikativ/boring {:mvn/version "0.1.4"}
                 lambdaisland/kaocha {:mvn/version "1.91.1392"}}}
 
   :build
