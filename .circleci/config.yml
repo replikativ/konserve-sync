@@ -23,7 +23,7 @@ jobs:
             - deps-
       - run:
           name: Resolve dependencies
-          command: clojure -A:dev:test:build -P
+          command: clojure -A:dev:test:cljs-test:build -P
       - save_cache:
           key: deps-{{ checksum "deps.edn" }}
           paths:
@@ -51,6 +51,29 @@ jobs:
       - run:
           name: Run Clojure tests
           command: clojure -M:test
+          no_output_timeout: 5m
+
+  # konserve-sync is a .cljc library whose whole point is server-to-BROWSER sync,
+  # and until now CI never compiled a line of ClojureScript. The JVM half passing
+  # says nothing about the half that runs in a browser.
+  test-cljs:
+    executor: tools/clojurecli
+    steps:
+      - attach_workspace:
+          at: /home/circleci
+      - run:
+          name: Install npm dependencies
+          command: npm install
+      - run:
+          name: Compile ClojureScript tests
+          command: npx shadow-cljs compile test
+          no_output_timeout: 5m
+      - run:
+          # Explicitly, rather than trusting the build's `:autorun`: a job that
+          # cannot report failure is worse than no job at all. `node` exits
+          # non-zero on a failing suite, so this is the actual gate.
+          name: Run ClojureScript tests
+          command: node target/test.js
           no_output_timeout: 5m
 
   build:
@@ -97,6 +120,10 @@ workflows:
           context: dockerhub-deploy
           requires:
             - setup
+      - test-cljs:
+          context: dockerhub-deploy
+          requires:
+            - setup
       - build:
           context: dockerhub-deploy
           requires:
@@ -111,6 +138,7 @@ workflows:
           requires:
             - format-check
             - test-clj
+            - test-cljs
             - build
       - release:
           context:
