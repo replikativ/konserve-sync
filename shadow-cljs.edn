@@ -1,5 +1,14 @@
 {:deps {:aliases [:cljs-test]}
  :builds
+ ;; One build, covering test/ and test-cbor/ alike:
+ ;;
+ ;;   npx shadow-cljs compile test
+ ;;
+ ;; There used to be a second `:cbor-test` build, invoked as `-A:cbor compile
+ ;; cbor-test`, because test-cbor/ needed an unreleased kabel. kabel 0.3.102 ships
+ ;; the CBOR middleware, so test-cbor/ and boring moved into :cljs-test -- at which
+ ;; point `-test$` already matched the CBOR namespaces and that build was running a
+ ;; strict subset of this one.
  {:test
   {:target :node-test
    :output-to "target/test.js"

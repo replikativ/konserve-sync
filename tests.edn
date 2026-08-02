@@ -1,0 +1,12 @@
+#kaocha/v1
+;; One suite over both paths. `test-cbor/` used to be a separate config invoked by
+;; hand (`--config-file tests-cbor.edn`) because it needed unreleased kabel; now that
+;; kabel 0.3.102 ships the CBOR middleware there is no reason for a second entry
+;; point, and a suite you have to remember to run is a suite that stops being run.
+;;
+;; Only .clj/.cljc are picked up here, so the `*_node_test.cljs` files stay with the
+;; shadow-cljs builds.
+{:tests [{:id          :unit
+          :test-paths  ["test" "test-cbor"]
+          :ns-patterns [".*-test$"]}]
+ :fail-fast? false}
