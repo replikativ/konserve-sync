@@ -6,7 +6,7 @@
   org.replikativ/hasch {:mvn/version "0.3.96"}
   org.replikativ/superv.async {:mvn/version "0.3.50"}
   com.taoensso/trove {:mvn/version "1.1.0"}
-  org.replikativ/kabel {:mvn/version "0.3.102"}}
+  org.replikativ/kabel {:mvn/version "0.3.105"}}
 
  :aliases
  {:dev
@@ -19,7 +19,7 @@
   ;; ordinary suite rather than a side channel nobody runs.
   {:extra-paths ["test" "test-cbor"]
    :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
-                org.replikativ/boring {:mvn/version "0.1.6"}
+                org.replikativ/boring {:mvn/version "0.1.17"}
                 ;; Optional dep for datahike walker tests (includes persistent-sorted-set)
                 org.replikativ/datahike {:mvn/version "0.8.1729"}}
    :main-opts ["-m" "kaocha.runner"]}
@@ -32,7 +32,7 @@
   {:extra-paths ["test" "test-cbor"]
    :extra-deps {thheller/shadow-cljs {:mvn/version "3.4.11"}
                 org.clojure/clojurescript {:mvn/version "1.12.145"}
-                org.replikativ/boring {:mvn/version "0.1.6"}}}
+                org.replikativ/boring {:mvn/version "0.1.17"}}}
 
   :build
   {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}

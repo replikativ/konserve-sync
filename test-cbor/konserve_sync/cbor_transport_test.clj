@@ -199,7 +199,12 @@
           (is (bdata/unknown-record? back)
               "it is an inert UnknownRecord, not a plain map that silently
                dropped its identity")
-          (is (= "konserve_sync.cbor_transport_test.WirePoint"
+          ;; boring >= 0.1.11 spells a record's wire name
+          ;; `my-ns.core/MyRecord` -- the last dot becomes the namespace
+          ;; separator and underscores in the namespace part become hyphens.
+          ;; It used to be the munged `my_ns.core.MyRecord`, which is what this
+          ;; asserted while the dependency was pinned eleven versions back.
+          (is (= "konserve-sync.cbor-transport-test/WirePoint"
                  (bdata/record-type back))
               "and it still knows what it was"))
 
@@ -215,9 +220,13 @@
     (let [server-store (<?? S (new-mem-store))
           client-store (<?? S (new-mem-store))
           client-registry
+          ;; REGISTERED UNDER BORING'S OWN SPELLING, because this registers
+          ;; straight with boring rather than through kabel's incognito bridge
+          ;; -- so nothing here translates the name, and the constructor is
+          ;; simply never reached if it does not match what the writer wrote.
           (atom (boring/register-record
                  (boring/tag-registry)
-                 "konserve_sync.cbor_transport_test.WirePoint"
+                 "konserve-sync.cbor-transport-test/WirePoint"
                  map->WirePoint))
           client-mw #(cbor-mw/cbor client-registry (atom {}) %)]
       ;; asymmetric on purpose: plain boring on the server, a registry on the

@@ -75,7 +75,7 @@
                (is (bdata/unknown-record? back))
                (is (= 3 (:x back)))
                (is (= 4 (:y back)))
-               (is (= "konserve_sync.cbor_transport_node_test.WirePoint"
+               (is (= "konserve-sync.cbor-transport-node-test/WirePoint"
                       (bdata/record-type back)))
                (done))))))
 
@@ -88,7 +88,7 @@
            (go
              (let [reg (atom (boring/register-record
                               (boring/tag-registry)
-                              "konserve_sync.cbor_transport_node_test.WirePoint"
+                              "konserve-sync.cbor-transport-node-test/WirePoint"
                               map->WirePoint))
                    sender (mw)
                    reader (mw #(cbor-mw reg (atom {}) %))]
