@@ -105,6 +105,8 @@
    - topic: The topic/store-id to subscribe to
    - local-store: Local konserve store to sync data into
    - opts: Options map
+     - :walk-fn (fn [store opts] -> channel) - Limit the client timestamp
+       inventory to reachable keys
      - :on-key-update (fn [key value operation]) - Called after each update
      - :on-complete (fn []) - Called when initial sync completes
 

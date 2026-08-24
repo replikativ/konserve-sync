@@ -191,6 +191,8 @@
    Parameters:
    - store: Local konserve store to sync into
    - opts: Options map
+     - :walk-fn (fn [store opts] -> channel) - Limit the client timestamp
+       inventory to reachable keys
      - :on-key-update (fn [key value operation]) - Called after each update"
   pubsub/store-sync-strategy)
 

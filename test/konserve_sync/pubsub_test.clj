@@ -81,6 +81,22 @@
         (is (contains? client-state :baz))
         (is (inst? (get client-state :foo))))))
 
+  (testing "Client strategy walks only reachable keys when configured"
+    (let [store (<?? S (new-mem-store))]
+      (<?? S (k/assoc store :reachable "kept"))
+      (<?? S (k/assoc store :garbage "ignored"))
+      (let [walk-calls (atom 0)
+            walk-fn (fn [_store _opts]
+                      (swap! walk-calls inc)
+                      (let [ch (chan 1)]
+                        (put! ch [:reachable])
+                        (close! ch)
+                        ch))
+            strategy (ks-pubsub/store-sync-strategy store {:walk-fn walk-fn})
+            client-state (<!! (proto/-init-client-state strategy))]
+        (is (= 1 @walk-calls))
+        (is (= #{:reachable} (set (keys client-state)))))))
+
   (testing "Server strategy handshake-items yields keys client doesn't have"
     (let [store (<?? S (new-mem-store))]
       ;; Add some data to server store

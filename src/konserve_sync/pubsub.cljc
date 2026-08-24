@@ -116,10 +116,25 @@
 
 (defn- get-local-key-timestamps
   "Get {key -> last-write} map from a konserve store.
+   When `:walk-fn` is supplied, inspect only keys reachable through that walk
+   instead of enumerating the entire local store. This matters for durable
+   client caches, which can retain large amounts of unreachable history.
    Returns a channel yielding the map."
-  [store]
+  [store {:keys [walk-fn]}]
   (go
-    (let [key-metas (<! (k/keys store))]
+    (let [key-metas (if walk-fn
+                      (let [walked-keys (<! (walk-fn store {:sync? false}))]
+                        (loop [remaining (seq walked-keys)
+                               result []]
+                          (if-not remaining
+                            result
+                            (let [key (first remaining)
+                                  meta (<! (k/get-meta store key))]
+                              (recur (next remaining)
+                                     (if meta
+                                       (conj result (assoc meta :key key))
+                                       result))))))
+                      (<! (k/keys store)))]
       (into {}
             (map (fn [{:keys [key last-write]}]
                    [key last-write]))
@@ -229,7 +244,7 @@
       (do
         (log/debug! {:id ::init-client-state
                      :msg "Initializing client state for differential sync"})
-        (get-local-key-timestamps (:store this)))
+        (get-local-key-timestamps (:store this) (:opts this)))
       ;; Server doesn't send client state
       (let [ch (chan 1)]
         (close! ch)
@@ -338,6 +353,8 @@
    Parameters:
    - store: Local konserve store to sync into
    - opts: Options map
+     - :walk-fn (fn [store opts] -> channel) - Limit the local timestamp
+       inventory to reachable keys. Without it, every local key is enumerated.
      - :on-key-update (fn [key value operation]) - Called after each update
        operation is :handshake, :assoc, or :dissoc"
   [store opts]
