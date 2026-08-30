@@ -109,9 +109,12 @@
                    target (<? S (new-mem-store))
                    blob (js/Uint8Array. #js [0 1 127 128 255])]
                (<? S (k/bassoc source :blob blob))
-               (let [item (<? S (proto/-handshake-items
-                                 (ks-pubsub/server-store-strategy source {}) {}))
+               (let [handshake (proto/-handshake-items
+                                (ks-pubsub/server-store-strategy source {}) {})
+                     item (<? S (:items handshake))
+                     completion (<? S (:completion handshake))
                      [_ item'] (<? S (through item))]
+                 (is (= {:ok true} completion))
                  (is (:binary? item'))
                  (is (= (:value item) (:value item'))
                      "base64 payload identical after the CBOR round trip")

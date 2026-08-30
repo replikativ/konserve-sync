@@ -253,25 +253,35 @@
   (-handshake-items [this client-state]
     ;; Server yields items to send during handshake
     (if (= :server (:role this))
-      (let [ch (chan 100)]
+      (let [ch (chan 100)
+            completion (chan 1)]
         (go
-          (log/debug! {:id ::handshake-items-start
-                       :msg "Computing handshake items"
-                       :data {:client-keys-count (count client-state)}})
-          (let [items (<! (get-keys-to-sync (:store this)
-                                            (or client-state {})
-                                            (:opts this)))]
-            (log/debug! {:id ::handshake-items-computed
-                         :msg "Sending handshake items"
-                         :data {:count (count items)}})
-            (doseq [item items]
-              (>! ch item))
-            (close! ch)))
-        ch)
+          (try
+            (log/debug! {:id ::handshake-items-start
+                         :msg "Computing handshake items"
+                         :data {:client-keys-count (count client-state)}})
+            (let [items (<! (get-keys-to-sync (:store this)
+                                              (or client-state {})
+                                              (:opts this)))]
+              (log/debug! {:id ::handshake-items-computed
+                           :msg "Sending handshake items"
+                           :data {:count (count items)}})
+              (doseq [item items]
+                (>! ch item))
+              (>! completion {:ok true}))
+            (catch #?(:clj Throwable :cljs :default) error
+              (>! completion {:error error}))
+            (finally
+              (close! ch)
+              (close! completion))))
+        (proto/checked-handshake-source ch completion))
       ;; Client doesn't produce handshake items
-      (let [ch (chan)]
+      (let [ch (chan)
+            completion (chan 1)]
         (close! ch)
-        ch)))
+        (put! completion {:ok true})
+        (close! completion)
+        (proto/checked-handshake-source ch completion))))
 
   (-apply-handshake-item [this {:keys [key value meta binary?]}]
     ;; Client applies handshake item to local store

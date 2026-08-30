@@ -19,12 +19,15 @@
                  target (<! (new-mem-store))
                  expected (js/Uint8Array. #js [0 1 127 128 255])
                  _ (<! (k/bassoc source :blob expected))
-                 item (<! (proto/-handshake-items
-                           (pubsub/server-store-strategy source {}) {}))
+                 handshake (proto/-handshake-items
+                            (pubsub/server-store-strategy source {}) {})
+                 item (<! (:items handshake))
+                 completion (<! (:completion handshake))
                  result (<! (proto/-apply-handshake-item
                              (pubsub/store-sync-strategy target {}) item))
                  actual (<! (stored-bytes target :blob))]
              (is (:binary? item))
+             (is (= {:ok true} completion))
              (is (= {:ok true} result))
              (is (= [0 1 127 128 255]
                     (vec (js/Array.from actual))))

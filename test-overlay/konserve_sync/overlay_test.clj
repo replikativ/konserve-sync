@@ -1,8 +1,7 @@
 (ns konserve-sync.overlay-test
-  "konserve-sync over kabel's peer-to-peer overlay.
+  "konserve-sync over Netz's peer-to-peer overlay.
 
-  The claim: `konserve_sync/pubsub.cljc` does not appear in this change. Its
-  `StoreSyncStrategy` already expresses both paths a replicated store needs —
+  Its `StoreSyncStrategy` already expresses both paths a replicated store needs —
   the live path (`-apply-publish`) and a differential state sync
   (`-init-client-state` → `-handshake-items` → `-apply-handshake-item`) — and
   neither was ever the transport's business. So this test calls exactly the
@@ -22,9 +21,9 @@
   (:require [clojure.test :refer [deftest testing is]]
             [konserve-sync.transport.kabel-pubsub :as kp]
             [kabel.pubsub :as pubsub]
-            [kabel.pubsub.overlay :as pso]
-            [kabel.overlay.runtime :as rt]
-            [kabel.identity :as id]
+            [netz.pubsub :as pso]
+            [netz.overlay.runtime :as rt]
+            [netz.identity :as id]
             [kabel.peer :as peer]
             [kabel.http-kit :as http-kit]
             [konserve.core :as k]
@@ -161,3 +160,24 @@
         (<?? S (k/dissoc server-store :doomed))
         (is (wait-for 8000 #(nil? (<?? S (k/get client-store :doomed))))
             "the deletion never propagated")))))
+
+(deftest public-unsubscribe-withdraws-overlay-interest
+  (testing "the unchanged konserve-sync API dispatches through Netz"
+    (with-overlay-peers
+      (fn [{:keys [server client server-store client-store client-run]}]
+        (<?? S (k/assoc server-store :key "initial"))
+        (kp/register-store! server :test-store server-store {})
+        (<?? S (kp/subscribe-store! client :test-store client-store {}))
+        (is (wait-for 8000 #(= "initial" (<?? S (k/get client-store :key)))))
+
+        (is (= {:ok true}
+               (<?? S (kp/unsubscribe-store! client :test-store))))
+        (is (wait-for 3000
+                      #(not (contains? (get-in (rt/overlay-state client-run)
+                                               [:dissemination :topics])
+                                       :test-store)))
+            "Netz retained topic interest after the public unsubscribe")
+
+        (<?? S (k/assoc server-store :key "after"))
+        (<?? S (timeout 300))
+        (is (= "initial" (<?? S (k/get client-store :key))))))))

@@ -6,7 +6,7 @@
   org.replikativ/hasch {:mvn/version "0.3.96"}
   org.replikativ/superv.async {:mvn/version "0.3.50"}
   com.taoensso/trove {:mvn/version "1.1.0"}
-  org.replikativ/kabel {:mvn/version "0.3.105"}}
+  org.replikativ/kabel {:mvn/version "0.3.116"}}
 
  :aliases
  {:dev
@@ -34,26 +34,23 @@
                 org.clojure/clojurescript {:mvn/version "1.12.145"}
                 org.replikativ/boring {:mvn/version "0.1.17"}}}
 
-  ;; konserve-sync over kabel's peer-to-peer OVERLAY rather than a single
-  ;; connection. The point of this alias is that konserve_sync/pubsub.cljc is
-  ;; not on its list of changes: `StoreSyncStrategy` already expresses both the
-  ;; live path (-apply-publish) and a differential state sync
+  ;; konserve-sync over Netz's peer-to-peer overlay rather than a single
+  ;; connection. `StoreSyncStrategy` already expresses both the live path
+  ;; (-apply-publish) and a differential state sync
   ;; (-init-client-state -> -handshake-items -> -apply-handshake-item), and
   ;; those were never the transport's business. So federation is a transport
   ;; swap, and this alias is the evidence.
   ;;
-  ;; Local roots because the overlay is unreleased; this becomes an ordinary
-  ;; kabel version bump once it ships.
+  ;; Local root until Netz's first alpha is published.
   ;;
   ;;   clojure -X:overlay:test :dirs '["test-overlay"]'
   :overlay
   {:extra-paths ["test-overlay"]
-   ;; hasch 0.4 as well: geheimnis (and so kabel's overlay) uses `hasch/sha256`,
+   ;; hasch 0.4 as well: geheimnis (and so Netz) uses `hasch/sha256`,
    ;; which 0.3 does not have. konserve-sync's own pin moves when it releases
    ;; against the overlay.
-   :override-deps {org.replikativ/kabel {:local/root "../kabel"}
-                   org.replikativ/hasch {:mvn/version "0.4.100"}}
-   :extra-deps {org.replikativ/geheimnis {:local/root "../geheimnis"}
+   :override-deps {org.replikativ/hasch {:mvn/version "0.4.100"}}
+   :extra-deps {org.replikativ/netz {:local/root "../netz"}
                 io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
    :exec-fn cognitect.test-runner.api/test}

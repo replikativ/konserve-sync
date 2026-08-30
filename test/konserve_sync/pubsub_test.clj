@@ -107,7 +107,8 @@
       (let [strategy (ks-pubsub/server-store-strategy store {})
             ;; Client has :a with old timestamp, doesn't have :b, :c
             client-state {:a #inst "2020-01-01T00:00:00.000-00:00"}
-            items-ch (proto/-handshake-items strategy client-state)
+            source (proto/-handshake-items strategy client-state)
+            items-ch (:items source)
             items (atom [])]
         ;; Collect all items
         (loop []
@@ -116,6 +117,7 @@
             (recur)))
 
         ;; Should have all 3 items (:a is stale, :b and :c are new)
+        (is (= {:ok true} (<!! (:completion source))))
         (is (= 3 (count @items)))
         (is (= #{:a :b :c} (set (map :key @items))))
         ;; Verify values
@@ -161,7 +163,8 @@
                                                       {:filter-fn (fn [k _]
                                                                     (clojure.string/starts-with?
                                                                      (name k) "public"))})
-            items-ch (proto/-handshake-items strategy {})
+            source (proto/-handshake-items strategy {})
+            items-ch (:items source)
             items (atom [])]
         (loop []
           (when-let [item (<!! items-ch)]
@@ -169,6 +172,7 @@
             (recur)))
 
         ;; Should only have public keys
+        (is (= {:ok true} (<!! (:completion source))))
         (is (= 2 (count @items)))
         (is (= #{:public-1 :public-2} (set (map :key @items))))))))
 
