@@ -10,7 +10,8 @@
 (defn- stored-bytes [store key]
   (k/bget store key
           (fn [{:keys [input-stream]}]
-            (go input-stream))))
+            (go input-stream))
+          {:raw? true}))
 
 (deftest binary-handshake-roundtrip
   (async done
@@ -20,11 +21,17 @@
                  expected (js/Uint8Array. #js [0 1 127 128 255])
                  _ (<! (k/bassoc source :blob expected))
                  item (<! (proto/-handshake-items
-                           (pubsub/server-store-strategy source {}) {}))
+                           (pubsub/server-store-strategy
+                            source {:binary-wire-format :bytes})
+                           {}))
                  result (<! (proto/-apply-handshake-item
-                             (pubsub/store-sync-strategy target {}) item))
+                             (pubsub/store-sync-strategy
+                              target {:binary-wire-format :bytes})
+                             item))
                  actual (<! (stored-bytes target :blob))]
              (is (:binary? item))
+             (is (= :bytes (:binary-encoding item)))
+             (is (instance? js/Uint8Array (:value item)))
              (is (= {:ok true} result))
              (is (= [0 1 127 128 255]
                     (vec (js/Array.from actual))))
