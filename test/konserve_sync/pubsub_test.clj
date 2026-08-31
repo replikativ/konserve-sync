@@ -31,6 +31,24 @@
                    (go input-stream))
                  {:raw? true})))
 
+(deftest ordered-publisher-overflow-is-bounded-and-forces-recovery
+  (let [events (chan 1)
+        subscriber (chan)
+        peer (atom {:pubsub {:topics {:store {:subscribers #{subscriber}}}}})
+        recovered (atom [])
+        hook (#'ks-pubsub/make-write-hook
+              peer :store events #(swap! recovered conj %))]
+    (hook {:api-op :assoc :key :first :value 1})
+    (hook {:api-op :assoc :key :overflow :value 2})
+    (is (= 1 (get-in @peer [:pubsub :topics :store :publisher-overflows])))
+    (is (nil? (<!! subscriber))
+        "overflow retires the subscriber so its reconnect takes a snapshot")
+    (is (= [:store] (mapv :topic @recovered))
+        "an overlay adapter receives an explicit state-sync signal")
+    (is (= :first (:key (<!! events)))
+        "the bounded lane retains its already-admitted prefix")
+    (close! events)))
+
 (defmacro with-store-peers
   "Execute body with server and client peers set up with konserve stores."
   [& body]

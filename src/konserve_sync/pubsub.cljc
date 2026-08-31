@@ -571,8 +571,9 @@
       {:ok true})))
 
 (defn- start-publisher!
-  [peer topic store filter-fn key-sort-fn max-binary-bytes binary-wire-format]
-  (let [events (chan 256)]
+  [peer topic store filter-fn key-sort-fn max-binary-bytes binary-wire-format
+   publisher-buffer]
+  (let [events (chan publisher-buffer)]
     (go-loop []
       (when-let [event (<! events)]
         (try
@@ -591,11 +592,34 @@
     events))
 
 (defn- make-write-hook
-  "Enqueue completed writes onto the per-store ordered publisher."
-  [events]
+  "Enqueue completed writes without retaining unbounded pending puts.
+
+  A synchronous Konserve write hook cannot park until the network catches up.
+  If its bounded lane fills, retire every direct subscriber so reconnect runs
+  the differential snapshot again; silently dropping one live write would
+  leave those replicas permanently incomplete."
+  [peer topic events on-publisher-overflow]
   (fn [event]
     (when (:api-op event)
-      (put! events event))))
+      (when-not (async/offer! events event)
+        (swap! peer update-in [:pubsub :topics topic :publisher-overflows]
+               (fnil inc 0))
+        (let [subscribers (pubsub/get-subscribers peer topic)]
+          (log/error! {:id ::write-hook-publisher-overflow
+                       :msg "Ordered publisher full; retiring subscribers for snapshot recovery"
+                       :data {:topic topic
+                              :api-op (:api-op event)
+                              :key (:key event)
+                              :subscriber-count (count subscribers)}})
+          (doseq [transport subscribers]
+            (close! transport))
+          (when on-publisher-overflow
+            (try
+              (on-publisher-overflow {:peer peer :topic topic :event event})
+              (catch #?(:clj Throwable :cljs :default) error
+                (log/error! {:id ::publisher-overflow-callback-error
+                             :msg "Publisher overflow callback failed"
+                             :data {:topic topic :error error}})))))))))
 
 (defn register-store!
   "Register a konserve store as a pubsub topic (server-side convenience).
@@ -641,6 +665,12 @@
        transfer profile.
      - :binary-wire-format - :base64 (legacy EDN carrier compatibility,
        default) or :bytes (native CBOR byte strings; the standards profile).
+     - :publisher-buffer - completed writes retained by the ordered publisher
+       (default 256). Overflow is bounded and retires direct subscribers so
+       their next subscription performs a differential snapshot.
+     - :on-publisher-overflow - callback receiving `{:peer :topic :event}`.
+       Overlay transports, which do not own direct subscriber channels, use it
+       to force a new application state-sync attempt.
 
    Returns the topic."
   [peer topic store opts]
@@ -652,6 +682,12 @@
         key-sort-fn (:key-sort-fn opts)
         max-binary-bytes (:max-binary-bytes opts default-max-binary-bytes)
         binary-wire-format (:binary-wire-format opts :base64)
+        publisher-buffer (:publisher-buffer opts 256)
+        on-publisher-overflow (:on-publisher-overflow opts)
+        _ (when-not (and (int? publisher-buffer) (pos? publisher-buffer))
+            (throw (ex-info "Publisher buffer must be a positive integer"
+                            {:type :konserve-sync/invalid-publisher-buffer
+                             :publisher-buffer publisher-buffer})))
         strategy (server-store-strategy store opts)
         hook-id (keyword (str "pubsub-" (if (keyword? topic) (name topic) (str topic))
                               "-" (random-uuid)))
@@ -667,7 +703,8 @@
                               (konserve.protocols/-get-write-hooks store)
                               (catch :default _ nil)))
         publisher-events (start-publisher! peer topic store filter-fn key-sort-fn
-                                           max-binary-bytes binary-wire-format)]
+                                           max-binary-bytes binary-wire-format
+                                           publisher-buffer)]
 
     (log/debug! {:id ::register-store-hooks-check
                  :msg "Checking write-hooks support"
@@ -681,7 +718,9 @@
                              :batch-size (:batch-size opts 20)
                              :item-timeout-ms item-timeout-ms})
 
-    (k/add-write-hook! store hook-id (make-write-hook publisher-events))
+    (k/add-write-hook! store hook-id
+                       (make-write-hook peer topic publisher-events
+                                        on-publisher-overflow))
 
     (log/debug! {:id ::register-store-hook-added
                  :msg "Write hook added"

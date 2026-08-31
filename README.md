@@ -174,6 +174,13 @@ Incremental writes pass through a per-store publisher in commit completion
 order. This matters for stateful inputs such as `InputStream`: the publisher
 refetches the completed binary value before allowing a later mutable head/root
 update to reach Kabel, so Kabel's own FIFO guarantee is preserved end to end.
+The lane retains 256 completed writes by default (`:publisher-buffer` changes
+the bound). If it fills, Konserve-sync closes direct subscribers instead of
+queueing unbounded callbacks or silently dropping a write; reconnect then runs
+the differential snapshot before live delivery resumes. An overlay transport
+does not necessarily expose direct subscriber channels, so it must supply
+`:on-publisher-overflow` to force its application state-sync path; the event is
+also counted at `[:pubsub :topics topic :publisher-overflows]`.
 
 ## Datahike Integration
 
