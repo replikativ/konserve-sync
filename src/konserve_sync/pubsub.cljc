@@ -36,8 +36,7 @@
             [hasch.base64 :as base64]
             [kabel.pubsub :as pubsub]
             [kabel.pubsub.protocol :as proto]
-            [konserve-sync.log :as log]
-            #?(:clj [clojure.java.io :as io]))
+            [konserve-sync.log :as log])
   #?(:clj (:import [java.io ByteArrayOutputStream InputStream])))
 
 ;; =============================================================================
@@ -49,16 +48,42 @@
             opts         ; {:filter-fn, :walk-fn, :key-sort-fn, :on-key-update}
             role])       ; :server or :client
 
+(def ^:private default-max-binary-bytes (* 4 1024 1024))
+
+(defn- binary-too-large [size limit]
+  (ex-info "Binary value exceeds the configured synchronization limit"
+           {:type :konserve-sync/binary-too-large
+            :size size
+            :limit limit}))
+
 #?(:clj
-   (defn- binary-bytes [{:keys [input-stream blob] :as binary}]
+   (defn- checked-bytes [value limit]
+     (when (> (alength ^bytes value) limit)
+       (throw (binary-too-large (alength ^bytes value) limit)))
+     value))
+
+#?(:clj
+   (defn- stream-bytes [^InputStream input limit]
+     (let [output (ByteArrayOutputStream.)
+           buffer (byte-array 8192)]
+       (loop [total 0]
+         (let [n (.read input buffer)]
+           (if (neg? n)
+             (.toByteArray output)
+             (let [total (+ total n)]
+               (when (> total limit)
+                 (throw (binary-too-large total limit)))
+               (.write output buffer 0 n)
+               (recur total))))))))
+
+#?(:clj
+   (defn- binary-bytes [{:keys [input-stream blob] :as binary} limit]
      (cond
-       (bytes? binary) binary
-       (bytes? input-stream) input-stream
+       (bytes? binary) (checked-bytes binary limit)
+       (bytes? input-stream) (checked-bytes input-stream limit)
        (instance? InputStream input-stream)
-       (let [out (ByteArrayOutputStream.)]
-         (io/copy input-stream out)
-         (.toByteArray out))
-       (bytes? blob) blob
+       (stream-bytes input-stream limit)
+       (bytes? blob) (checked-bytes blob limit)
        :else (throw (ex-info "Unsupported JVM binary representation"
                              {:value-type (type binary)})))))
 
@@ -73,23 +98,52 @@
            out)))))
 
 #?(:cljs
-   (defn- binary-channel [{:keys [input-stream blob] :as binary}]
+   (defn- binary-channel [{:keys [input-stream blob] :as binary} limit]
      (let [out (chan 1)
            ^js value (or input-stream blob binary)]
        (cond
          (instance? js/Uint8Array value)
-         (put! out value)
+         (put! out (if (> (.-byteLength value) limit)
+                     (binary-too-large (.-byteLength value) limit)
+                     value))
 
          (and value (fn? (.-arrayBuffer value)))
-         (-> (.arrayBuffer value)
-             (.then #(put! out (js/Uint8Array. %)))
-             (.catch #(put! out %)))
+         (if (and (number? (.-size value)) (> (.-size value) limit))
+           (put! out (binary-too-large (.-size value) limit))
+           (-> (.arrayBuffer value)
+               (.then (fn [buffer]
+                        (let [bytes (js/Uint8Array. buffer)]
+                          (put! out
+                                (if (> (.-byteLength bytes) limit)
+                                  (binary-too-large (.-byteLength bytes) limit)
+                                  bytes)))))
+               (.catch #(put! out %))))
 
          (and value (fn? (.-on value)))
-         (let [chunks (atom [])]
-           (.on value "data" #(swap! chunks conj %))
-           (.once value "end" #(put! out (concat-binary-chunks @chunks)))
-           (.once value "error" #(put! out %)))
+         (let [chunks (atom [])
+               total (atom 0)
+               failed? (atom false)]
+           (.on value "data"
+                (fn [chunk]
+                  (when-not @failed?
+                    (let [n (+ @total (.-length chunk))]
+                      (if (> n limit)
+                        (do
+                          (reset! failed? true)
+                          (put! out (binary-too-large n limit))
+                          (when (fn? (.-destroy value))
+                            (.destroy value)))
+                        (do
+                          (reset! total n)
+                          (swap! chunks conj chunk)))))))
+           (.once value "end"
+                  #(when-not @failed?
+                     (put! out (concat-binary-chunks @chunks))))
+           (.once value "error"
+                  (fn [error]
+                    (when-not @failed?
+                      (reset! failed? true)
+                      (put! out error)))))
 
          :else
          (put! out (ex-info "Unsupported CLJS binary representation"
@@ -100,19 +154,37 @@
   "Materialize one Konserve binary object while its bget callback is valid.
   Geschichte keeps these objects bounded (4 MiB by default); transport-level
   framing for arbitrary monolithic values is a separate protocol extension."
-  [store key]
+  [store key limit]
   (k/bget store key
           (fn [binary]
-            #?(:clj (go (binary-bytes binary))
-               :cljs (binary-channel binary)))
-          {:sync? false :streaming? true}))
+            #?(:clj (go (binary-bytes binary limit))
+               :cljs (binary-channel binary limit)))
+          {:sync? false :streaming? true :raw? true}))
 
-(defn- encode-binary [value]
-  (base64/encode value))
+(defn- wire-binary [value limit]
+  #?(:clj (checked-bytes value limit)
+     :cljs (if (> (.-byteLength value) limit)
+             (throw (binary-too-large (.-byteLength value) limit))
+             value)))
 
-(defn- decode-binary [value]
-  #?(:clj (base64/decode value)
-     :cljs (js/Uint8Array. (base64/decode value))))
+(defn- encode-wire-binary [value encoding limit]
+  (let [value (wire-binary value limit)]
+    (case encoding
+      :bytes value
+      :base64 (base64/encode value)
+      (throw (ex-info "Unsupported binary wire encoding"
+                      {:type :konserve-sync/unsupported-binary-encoding
+                       :encoding encoding})))))
+
+(defn- decode-wire-binary [value encoding limit]
+  (let [value (case encoding
+                :bytes value
+                :base64 #?(:clj (base64/decode value)
+                           :cljs (js/Uint8Array. (base64/decode value)))
+                (throw (ex-info "Unsupported binary wire encoding"
+                                {:type :konserve-sync/unsupported-binary-encoding
+                                 :encoding encoding})))]
+    (wire-binary value limit)))
 
 (defn- get-local-key-timestamps
   "Get {key -> last-write} map from a konserve store.
@@ -167,8 +239,12 @@
    it references — on every handshake, not just when a clock comparison happens to say
    so. The cost is bounded: one small value per mutable cell per handshake, while the
    bulk (content-addressed nodes) still dedups."
-  [store client-timestamps {:keys [filter-fn walk-fn key-sort-fn always-send-mutable?]
-                            :or {filter-fn (constantly true)}}]
+  [store client-timestamps
+   {:keys [filter-fn walk-fn key-sort-fn always-send-mutable? max-binary-bytes
+           binary-wire-format]
+    :or {filter-fn (constantly true)
+         max-binary-bytes default-max-binary-bytes
+         binary-wire-format :base64}}]
   (go
     (let [;; Get keys - use walk-fn if provided, otherwise k/keys
           all-key-metas (if walk-fn
@@ -228,11 +304,16 @@
           result
           (let [k (first remaining)
                 binary? (contains? binary-keys k)
-                v (<! (if binary? (read-binary store k) (k/get store k)))
-                v (if binary? (encode-binary v) v)]
+                v (<! (if binary?
+                        (read-binary store k max-binary-bytes)
+                        (k/get store k)))
+                v (if binary?
+                    (encode-wire-binary v binary-wire-format max-binary-bytes)
+                    v)]
             (recur (next remaining)
                    (conj result (cond-> {:key k :value v}
-                                  binary? (assoc :binary? true)
+                                  binary? (assoc :binary? true
+                                                 :binary-encoding binary-wire-format)
                                   (immutable-keys k) (assoc :meta {:immutable? true}))))))))))
 
 (extend-type StoreSyncStrategy
@@ -273,7 +354,8 @@
         (close! ch)
         ch)))
 
-  (-apply-handshake-item [this {:keys [key value meta binary?]}]
+  (-apply-handshake-item
+    [this {:keys [key value meta binary? binary-encoding]}]
     ;; Client applies handshake item to local store
     (let [ch (chan 1)]
       (if (= :client (:role this))
@@ -283,12 +365,18 @@
               ;; immutable value already held (reconnect / overlap) — skip the
               ;; re-store so its write-hook doesn't re-publish (echo).
               (log/trace! {:id ::apply-handshake-skip-immutable :data {:key key}})
-              (let [stored-value (if binary? (decode-binary value) value)]
+              (let [stored-value (if binary?
+                                   (decode-wire-binary
+                                    value
+                                    (or binary-encoding :base64)
+                                    (get-in this [:opts :max-binary-bytes]
+                                            default-max-binary-bytes))
+                                   value)]
                 (log/trace! {:id ::apply-handshake-item
                              :msg "Applying handshake item"
                              :data {:key key}})
                 (<! (if binary?
-                      (k/bassoc (:store this) key stored-value)
+                      (k/bassoc (:store this) key stored-value {:raw? true})
                       (k/assoc (:store this) key stored-value)))
                 ;; Invoke callback if provided
                 (when-let [on-key-update (get-in this [:opts :on-key-update])]
@@ -306,7 +394,8 @@
           (close! ch)))
       ch))
 
-  (-apply-publish [this {:keys [key value operation meta binary?] :as payload}]
+  (-apply-publish
+    [this {:keys [key value operation meta binary? binary-encoding] :as payload}]
     ;; Apply publish to local store (both client and server can receive)
     (let [ch (chan 1)]
       (go
@@ -320,14 +409,20 @@
             ;; means "identical"). Mutable cells (roots) never reach here — they ride
             ;; the convergent δ path, not the node push.
             (log/trace! {:id ::apply-publish-skip-immutable :data {:key key}})
-            (let [stored-value (if binary? (decode-binary value) value)]
+            (let [stored-value (if binary?
+                                 (decode-wire-binary
+                                  value
+                                  (or binary-encoding :base64)
+                                  (get-in this [:opts :max-binary-bytes]
+                                          default-max-binary-bytes))
+                                 value)]
               (case operation
                 :dissoc
                 (<! (k/dissoc (:store this) key))
 
                 ;; Default: assoc/bassoc
                 (<! (if binary?
-                      (k/bassoc (:store this) key stored-value)
+                      (k/bassoc (:store this) key stored-value {:raw? true})
                       (k/assoc (:store this) key stored-value))))
 
               ;; Invoke callback if provided
@@ -397,101 +492,110 @@
 ;; Convenience: Write Hook Integration
 ;; =============================================================================
 
+(defn- publish-one!
+  [peer topic payload]
+  (go
+    (let [result (<! (pubsub/publish! peer topic payload))]
+      (if-let [error (:error result)]
+        (throw error)
+        result))))
+
+(defn- publish-event!
+  "Publish one completed store write. This function may materialize a consumed
+  binary input, so callers must serialize invocations to preserve commit order."
+  [peer topic store filter-fn key-sort-fn max-binary-bytes binary-wire-format event]
+  (go
+    (let [{:keys [api-op key value kvs]} event
+          subscribers (pubsub/get-subscribers peer topic)]
+      (log/debug! {:id ::write-hook-event
+                   :msg "Publishing completed store write"
+                   :data {:api-op api-op
+                          :key key
+                          :topic topic
+                          :subscriber-count (count subscribers)}})
+      (case api-op
+        (:assoc :assoc-in :update :update-in)
+        (when (filter-fn key value)
+          (<! (publish-one!
+               peer topic
+               (cond-> {:key key :value value :operation :assoc}
+                 (:meta event) (assoc :meta (:meta event))))))
+
+        :bassoc
+        (when (filter-fn key value)
+          (let [stored
+                #?(:clj (if (bytes? value)
+                          (wire-binary value max-binary-bytes)
+                          (<! (read-binary store key max-binary-bytes)))
+                   :cljs (if (instance? js/Uint8Array value)
+                           (wire-binary value max-binary-bytes)
+                           (<! (read-binary store key max-binary-bytes))))]
+            (<! (publish-one! peer topic
+                              {:key key
+                               :value (encode-wire-binary stored binary-wire-format
+                                                          max-binary-bytes)
+                               :operation :assoc
+                               :binary? true
+                               :binary-encoding binary-wire-format}))))
+
+        :dissoc
+        (when (filter-fn key nil)
+          (<! (publish-one! peer topic {:key key :operation :dissoc})))
+
+        :multi-assoc
+        (let [ordered-kvs (if (map? kvs)
+                            (cond->> kvs
+                              key-sort-fn (sort-by (fn [[k _]] (key-sort-fn k))))
+                            kvs)
+              metadata (:meta event)]
+          (log/debug! {:id ::write-hook-multi-assoc
+                       :msg "Publishing multi-assoc"
+                       :data {:key-count (count ordered-kvs)
+                              :ordered? (not (map? kvs))
+                              :topic topic
+                              :subscribers (count subscribers)
+                              :keys (mapv first ordered-kvs)}})
+          (loop [remaining (seq ordered-kvs)]
+            (when-let [[k v] (first remaining)]
+              (when (filter-fn k v)
+                (let [km (get metadata k)]
+                  (<! (publish-one!
+                       peer topic
+                       (cond-> {:key k :value v :operation :assoc}
+                         km (assoc :meta km))))))
+              (recur (next remaining)))))
+
+        (log/warn! {:id ::write-hook-unknown-op
+                    :msg "Unknown api-op in write hook"
+                    :data {:api-op api-op}}))
+      {:ok true})))
+
+(defn- start-publisher!
+  [peer topic store filter-fn key-sort-fn max-binary-bytes binary-wire-format]
+  (let [events (chan 256)]
+    (go-loop []
+      (when-let [event (<! events)]
+        (try
+          (let [result (<! (publish-event! peer topic store filter-fn key-sort-fn
+                                           max-binary-bytes binary-wire-format event))]
+            (when (instance? #?(:clj Throwable :cljs js/Error) result)
+              (throw result)))
+          (catch #?(:clj Throwable :cljs :default) error
+            (log/error! {:id ::write-hook-publish-error
+                         :msg "Failed to publish completed store write"
+                         :data {:topic topic
+                                :api-op (:api-op event)
+                                :key (:key event)
+                                :error error}})))
+        (recur)))
+    events))
+
 (defn- make-write-hook
-  "Create a write-hook that publishes changes to pubsub."
-  [peer topic store filter-fn key-sort-fn]
+  "Enqueue completed writes onto the per-store ordered publisher."
+  [events]
   (fn [event]
-    (when-let [api-op (:api-op event)]
-      (let [{:keys [key value kvs]} event
-            subscribers (pubsub/get-subscribers peer topic)]
-        (log/debug! {:id ::write-hook-event
-                     :msg "Write hook triggered"
-                     :data {:api-op api-op
-                            :key key
-                            :topic topic
-                            :subscriber-count (count subscribers)}})
-        (case api-op
-          ;; Single key write operations
-          (:assoc :assoc-in :update :update-in)
-          (when (filter-fn key value)
-            (log/debug! {:id ::write-hook-publish
-                         :msg "Publishing single key"
-                         :data {:key key :topic topic :subscribers (count subscribers)}})
-            ;; forward the value's metadata (:immutable? marks content-addressed,
-            ;; write-once values) so a receiver can skip re-storing one it already
-            ;; has — terminating the bidirectional write-hook echo.
-            (pubsub/publish! peer topic (cond-> {:key key :value value :operation :assoc}
-                                          (:meta event) (assoc :meta (:meta event)))))
-
-          :bassoc
-          (when (filter-fn key value)
-            ;; Byte buffers (Geschichte chunks) remain valid after bassoc and can
-            ;; be published immediately, preserving their write-before-head order.
-            ;; Stateful inputs have been consumed by the store, so refetch them.
-            #?(:clj
-               (if (bytes? value)
-                 (pubsub/publish! peer topic
-                                  {:key key :value (encode-binary value)
-                                   :operation :assoc :binary? true})
-                 (go (let [stored (<! (read-binary store key))]
-                       (pubsub/publish! peer topic
-                                        {:key key :value (encode-binary stored) :operation :assoc
-                                         :binary? true}))))
-               :cljs
-               (if (instance? js/Uint8Array value)
-                 (pubsub/publish! peer topic
-                                  {:key key :value (encode-binary value)
-                                   :operation :assoc :binary? true})
-                 (go (let [stored (<! (read-binary store key))]
-                       (pubsub/publish! peer topic
-                                        {:key key :value (encode-binary stored) :operation :assoc
-                                         :binary? true}))))))
-
-          ;; Delete
-          :dissoc
-          (when (filter-fn key nil)
-            (log/debug! {:id ::write-hook-publish
-                         :msg "Publishing dissoc"
-                         :data {:key key :topic topic :subscribers (count subscribers)}})
-            (pubsub/publish! peer topic {:key key :operation :dissoc}))
-
-          ;; Multi-key batch. An ORDERED batch (a seq of [k v] pairs) already CARRIES its
-          ;; apply order: konserve's multi-assoc contract makes sequence order the apply
-          ;; order, and a writer puts the mutable pointer LAST (write-the-leaves-then-
-          ;; flip-the-root). Relay it VERBATIM, so a subscriber applies the batch in the
-          ;; order the writer committed it and the pointer lands only after everything it
-          ;; references. That is a causal guarantee carried from the source.
-          ;;
-          ;; A MAP batch has no order, so there is nothing to carry: key-sort-fn imposes
-          ;; one after the fact, by guessing from the shape of the key (e.g. "keywords are
-          ;; roots, sort them last"). That is a heuristic — it is silently wrong for any
-          ;; store whose keys don't fit the guess — and it is kept only for map batches and
-          ;; legacy callers. Prefer an ordered batch.
-          :multi-assoc
-          (let [ordered-kvs (if (map? kvs)
-                              (cond->> kvs
-                                key-sort-fn (sort-by (fn [[k _]] (key-sort-fn k))))
-                              kvs)]
-            (log/debug! {:id ::write-hook-multi-assoc
-                         :msg "Publishing multi-assoc"
-                         :data {:key-count (count ordered-kvs)
-                                :ordered? (not (map? kvs))
-                                :topic topic
-                                :subscribers (count subscribers)
-                                :keys (mapv first ordered-kvs)}})
-            ;; per-key meta is a pure-data map {key -> meta} (e.g. mark nodes immutable but
-            ;; the batch's mutable branch-head pointer not); look it up per key.
-            (let [m (:meta event)]
-              (doseq [[k v] ordered-kvs]
-                (when (filter-fn k v)
-                  (let [km (get m k)]
-                    (pubsub/publish! peer topic (cond-> {:key k :value v :operation :assoc}
-                                                  km (assoc :meta km))))))))
-
-          ;; Unknown - ignore
-          (log/warn! {:id ::write-hook-unknown-op
-                      :msg "Unknown api-op in write hook"
-                      :data {:api-op api-op}}))))))
+    (when (:api-op event)
+      (put! events event))))
 
 (defn register-store!
   "Register a konserve store as a pubsub topic (server-side convenience).
@@ -532,6 +636,11 @@
            which has no order to carry, still falls back to this.
      - :batch-size - Items per batch during handshake (default 20)
      - :item-timeout-ms - Timeout waiting for next item (default 10000 for walk-fn)
+     - :max-binary-bytes - Largest binary value materialized into one pubsub
+       message (default 4 MiB). Larger values require a future bulk/chunked
+       transfer profile.
+     - :binary-wire-format - :base64 (legacy EDN carrier compatibility,
+       default) or :bytes (native CBOR byte strings; the standards profile).
 
    Returns the topic."
   [peer topic store opts]
@@ -541,6 +650,8 @@
                      :store-type (type store)}})
   (let [filter-fn (or (:filter-fn opts) (constantly true))
         key-sort-fn (:key-sort-fn opts)
+        max-binary-bytes (:max-binary-bytes opts default-max-binary-bytes)
+        binary-wire-format (:binary-wire-format opts :base64)
         strategy (server-store-strategy store opts)
         hook-id (keyword (str "pubsub-" (if (keyword? topic) (name topic) (str topic))
                               "-" (random-uuid)))
@@ -554,7 +665,9 @@
                              (catch Exception _ nil))
                       :cljs (try
                               (konserve.protocols/-get-write-hooks store)
-                              (catch :default _ nil)))]
+                              (catch :default _ nil)))
+        publisher-events (start-publisher! peer topic store filter-fn key-sort-fn
+                                           max-binary-bytes binary-wire-format)]
 
     (log/debug! {:id ::register-store-hooks-check
                  :msg "Checking write-hooks support"
@@ -568,10 +681,7 @@
                              :batch-size (:batch-size opts 20)
                              :item-timeout-ms item-timeout-ms})
 
-    ;; Set up write hook for auto-publishing
-    ;; Pass key-sort-fn to ensure multi-assoc keys are published in correct order
-    (k/add-write-hook! store hook-id
-                       (make-write-hook peer topic store filter-fn key-sort-fn))
+    (k/add-write-hook! store hook-id (make-write-hook publisher-events))
 
     (log/debug! {:id ::register-store-hook-added
                  :msg "Write hook added"
@@ -582,6 +692,7 @@
     ;; Store hook-id for later removal
     (swap! peer assoc-in [:pubsub :topics topic :write-hook-id] hook-id)
     (swap! peer assoc-in [:pubsub :topics topic :store] store)
+    (swap! peer assoc-in [:pubsub :topics topic :publisher-events] publisher-events)
 
     topic))
 
@@ -598,5 +709,7 @@
     (when-let [hook-id (:write-hook-id topic-data)]
       (when-let [store (:store topic-data)]
         (k/remove-write-hook! store hook-id)))
+    (when-let [events (:publisher-events topic-data)]
+      (close! events))
     ;; Unregister topic
     (pubsub/unregister-topic! peer topic)))

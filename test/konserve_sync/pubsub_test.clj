@@ -28,7 +28,8 @@
 (defn- stored-bytes [store key]
   (<?? S (k/bget store key
                  (fn [{:keys [input-stream]}]
-                   (go input-stream)))))
+                   (go input-stream))
+                 {:raw? true})))
 
 (defmacro with-store-peers
   "Execute body with server and client peers set up with konserve stores."
@@ -150,6 +151,30 @@
 
       (is (nil? (<?? S (k/get store :pub-key))))))
 
+  (testing "the CBOR profile carries native byte strings and enforces its bound"
+    (let [source (<?? S (new-mem-store))
+          target (<?? S (new-mem-store))
+          bytes (byte-array [0 1 2 3 4])]
+      (<?? S (k/bassoc source :blob bytes))
+      (let [items (proto/-handshake-items
+                   (ks-pubsub/server-store-strategy
+                    source {:binary-wire-format :bytes})
+                   {})
+            item (<!! items)]
+        (is (bytes? (:value item)))
+        (is (= :bytes (:binary-encoding item)))
+        (is (= (seq bytes) (seq (:value item)))))
+      (let [result
+            (<!! (proto/-apply-handshake-item
+                  (ks-pubsub/store-sync-strategy target {:max-binary-bytes 4})
+                  {:key :too-large
+                   :value bytes
+                   :binary? true
+                   :binary-encoding :bytes}))]
+        (is (= :konserve-sync/binary-too-large
+               (:type (ex-data (:error result)))))
+        (is (false? (<?? S (k/exists? target :too-large)))))))
+
   (testing "Strategy filter-fn filters keys during handshake"
     (let [store (<?? S (new-mem-store))]
       ;; Add some data
@@ -199,13 +224,18 @@
       (is (= [1 2 3] (<?? S (k/get *client-store* :key3)))))))
 
 (deftest binary-store-sync-integration-test
-  (testing "binary values use bassoc during handshake and incremental sync"
+  (testing "binary values sync and stateful inputs cannot be overtaken"
     (with-store-peers
       (let [initial (byte-array (map unchecked-byte (range 64)))
-            incremental (byte-array (map unchecked-byte (range 127 -1 -1)))]
+            incremental (byte-array (map unchecked-byte (range 127 -1 -1)))
+            streamed (byte-array (map unchecked-byte (range 32)))
+            updates (atom [])]
         (<?? S (k/bassoc *server-store* :initial-blob initial))
         (kp/register-store! *server-peer* :binary-store *server-store* {})
-        (<?? S (kp/subscribe-store! *client-peer* :binary-store *client-store* {}))
+        (<?? S (kp/subscribe-store!
+                *client-peer* :binary-store *client-store*
+                {:on-key-update (fn [key _value _operation]
+                                  (swap! updates conj key))}))
         (<?? S (timeout 800))
 
         (is (= (seq initial) (seq (stored-bytes *client-store* :initial-blob))))
@@ -214,7 +244,18 @@
         (<?? S (k/bassoc *server-store* :new-blob incremental))
         (<?? S (timeout 500))
         (is (= (seq incremental) (seq (stored-bytes *client-store* :new-blob))))
-        (is (= :binary (:type (<?? S (k/get-meta *client-store* :new-blob)))))))))
+        (is (= :binary (:type (<?? S (k/get-meta *client-store* :new-blob)))))
+
+        (reset! updates [])
+        (<?? S (k/bassoc *server-store* :stream-blob
+                         (java.io.ByteArrayInputStream. streamed)))
+        (<?? S (k/assoc *server-store* :head :ready))
+        (<?? S (timeout 500))
+        (is (= [:stream-blob :head] (take 2 @updates))
+            "binary refetch completes before a later mutable pointer publishes")
+        (is (= (seq streamed)
+               (seq (stored-bytes *client-store* :stream-blob))))
+        (is (= :ready (<?? S (k/get *client-store* :head))))))))
 
 (deftest incremental-store-sync-test
   (testing "Incremental updates via pubsub after initial sync"

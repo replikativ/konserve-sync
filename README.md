@@ -16,6 +16,8 @@ A synchronization layer for [konserve](https://github.com/replikativ/konserve) k
 - **Batched initial sync**: Backpressure via acknowledgments prevents overwhelming slow clients
 - **Pluggable transports**: Channel-based (testing) and kabel (network) transports included
 - **Custom key discovery**: Walk functions for tree-structured data (e.g., Datahike)
+- **Binary values**: Bounded `bassoc`/`bget` replication with an ordered
+  live publication queue
 
 ## Installation
 
@@ -138,6 +140,40 @@ When some keys depend on others, use `:key-sort-fn` to control sync order. Keys 
 ```
 
 This prevents "not found" errors when callbacks try to use a key before its dependencies are synced.
+
+## Binary replication
+
+Binary Konserve values are replicated as logical payload bytes and written with
+`bassoc`; they are not copied as backend-specific storage blobs. This keeps
+replication portable across file, object, IndexedDB, and memory backends. If a
+binary value was explicitly sealed by Konserve, its ciphertext remains opaque
+payload bytes and is copied unchanged.
+
+The default maximum materialized value is 4 MiB:
+
+```clojure
+(pubsub/register-store! peer :store store
+  {:max-binary-bytes (* 4 1024 1024)
+   ;; Standards profile for Kabel CBOR (RFC 8949 byte string):
+   :binary-wire-format :bytes})
+```
+
+Use `:binary-wire-format :bytes` when the Kabel connection uses CBOR. The
+payload is then a native CBOR byte string with no base64 expansion.
+`:binary-wire-format :base64` remains the default for compatibility with old
+Kabel EDN carriers. Every payload identifies its encoding, so receivers reject
+unknown encodings instead of guessing.
+
+Values above the configured bound fail with
+`:konserve-sync/binary-too-large`. Chunked/bulk raw-store transfer is
+deliberately a separate future profile: it needs compatibility metadata,
+integrity checks, resumption, and flow control rather than one oversized pubsub
+message.
+
+Incremental writes pass through a per-store publisher in commit completion
+order. This matters for stateful inputs such as `InputStream`: the publisher
+refetches the completed binary value before allowing a later mutable head/root
+update to reach Kabel, so Kabel's own FIFO guarantee is preserved end to end.
 
 ## Datahike Integration
 
