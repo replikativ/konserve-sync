@@ -464,3 +464,65 @@
         (<?? S (timeout 800))
         (is (= [:s1 :s2 :s3] @applied)
             "successive assocs arrive in call order")))))
+
+;; =============================================================================
+;; Live flow control (kabel live windows)
+;; =============================================================================
+
+(defn- drain-items [ch]
+  (loop [items []]
+    (if-let [item (<!! ch)]
+      (recur (conj items item))
+      items)))
+
+(deftest resync-handshake-resends-mutable-keys-test
+  (testing "a lagging subscriber's newer-looking timestamp does not hide a lost update"
+    (let [store (<?? S (new-mem-store))]
+      (<?? S (k/assoc store :node {:v 1} {:immutable? true} {:sync? false}))
+      (<?? S (k/assoc store :head {:points-at :node :version 2}))
+      (let [strategy (ks-pubsub/server-store-strategy store {})
+            ;; The subscriber applied an OLDER :head after the server wrote this
+            ;; one, so its own last-write is later; it holds :node too.
+            far-future #inst "2100-01-01"
+            client-state {:head far-future :node far-future}
+            keys-of #(set (map :key (drain-items %)))]
+        (is (= #{} (keys-of (proto/-handshake-items strategy client-state)))
+            "the ordinary handshake trusts the timestamps")
+        (is (= #{:head} (keys-of (proto/-resync-handshake-items strategy client-state)))
+            "the resync handshake resends the mutable key, not the immutable one")))))
+
+(deftest write-burst-beyond-the-lane-converges-test
+  (testing "thousands of single-key writes reach the subscriber, paced by its acks"
+    (with-store-peers
+      (kp/register-store! *server-peer* :burst *server-store* {})
+      (<?? S (kp/subscribe-store! *client-peer* :burst *client-store* {}))
+      (<?? S (timeout 300))
+      (dotimes [i 2000]
+        (<?? S (k/assoc *server-store* i {:i i})))
+      (is (loop [n 300]
+            (or (= 2000 (count (<?? S (k/keys *client-store*))))
+                (when (pos? n) (<?? S (timeout 100)) (recur (dec n)))))
+          "every key arrives; the connection survives the burst")
+      (is (= {:i 1999} (<?? S (k/get *client-store* 1999)))))))
+
+(deftest overflow-resync-converges-test
+  (testing "a subscriber whose queue overflows resubscribes and catches up"
+    (with-store-peers
+      ;; Small enough to overflow repeatedly while the burst runs; escalation
+      ;; to retirement (kabel's :max-resyncs) is kept out of the way here.
+      (kp/register-store! *server-peer* :tiny *server-store*
+                          {:max-queued-publishes 2 :max-resyncs 1000})
+      (let [handshakes (atom 0)]
+        (<?? S (kp/subscribe-store! *client-peer* :tiny *client-store*
+                                    {:on-complete (fn [& _] (swap! handshakes inc))}))
+        (<?? S (timeout 300))
+        (dotimes [i 1000]
+          (<?? S (k/assoc *server-store* i {:i i}))
+          ;; a mutable key rewritten throughout the burst
+          (<?? S (k/assoc *server-store* :head {:at i})))
+        (is (loop [n 300]
+              (or (and (= 1001 (count (<?? S (k/keys *client-store*))))
+                       (= {:at 999} (<?? S (k/get *client-store* :head))))
+                  (when (pos? n) (<?? S (timeout 100)) (recur (dec n)))))
+            "converged, including the final value of the mutable key")
+        (is (< 1 @handshakes) "through at least one resync")))))

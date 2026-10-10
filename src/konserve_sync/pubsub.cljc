@@ -235,6 +235,43 @@
                                   binary? (assoc :binary? true)
                                   (immutable-keys k) (assoc :meta {:immutable? true}))))))))))
 
+(defn- handshake-items
+  "Server side: a channel of the items to send a subscriber with
+  `client-state` ({key -> last-write}), computed under `opts`."
+  [this client-state opts]
+  (if (= :server (:role this))
+    (let [ch (chan 100)]
+      (go
+        (log/debug! {:id ::handshake-items-start
+                     :msg "Computing handshake items"
+                     :data {:client-keys-count (count client-state)}})
+        (let [items (<! (get-keys-to-sync (:store this)
+                                          (or client-state {})
+                                          opts))]
+          (log/debug! {:id ::handshake-items-computed
+                       :msg "Sending handshake items"
+                       :data {:count (count items)}})
+          (doseq [item items]
+            (>! ch item))
+          (close! ch)))
+      ch)
+    ;; Client doesn't produce handshake items
+    (let [ch (chan)]
+      (close! ch)
+      ch)))
+
+(extend-type StoreSyncStrategy
+  proto/PResyncHandshake
+
+  ;; A subscriber that resubscribes after its live window overflowed missed
+  ;; publications, and its timestamps say nothing about which: it applied an
+  ;; older version of a mutable key AFTER the server wrote the newer one, so
+  ;; its own :last-write is the newer of the two and the timestamp filter would
+  ;; skip exactly the update it lost. Resend every mutable key; immutable keys
+  ;; still dedup by presence.
+  (-resync-handshake-items [this client-state]
+    (handshake-items this client-state (assoc (:opts this) :always-send-mutable? true))))
+
 (extend-type StoreSyncStrategy
   proto/PSyncStrategy
 
@@ -252,26 +289,7 @@
 
   (-handshake-items [this client-state]
     ;; Server yields items to send during handshake
-    (if (= :server (:role this))
-      (let [ch (chan 100)]
-        (go
-          (log/debug! {:id ::handshake-items-start
-                       :msg "Computing handshake items"
-                       :data {:client-keys-count (count client-state)}})
-          (let [items (<! (get-keys-to-sync (:store this)
-                                            (or client-state {})
-                                            (:opts this)))]
-            (log/debug! {:id ::handshake-items-computed
-                         :msg "Sending handshake items"
-                         :data {:count (count items)}})
-            (doseq [item items]
-              (>! ch item))
-            (close! ch)))
-        ch)
-      ;; Client doesn't produce handshake items
-      (let [ch (chan)]
-        (close! ch)
-        ch)))
+    (handshake-items this client-state (:opts this)))
 
   (-apply-handshake-item [this {:keys [key value meta binary?]}]
     ;; Client applies handshake item to local store
@@ -532,6 +550,14 @@
            which has no order to carry, still falls back to this.
      - :batch-size - Items per batch during handshake (default 20)
      - :item-timeout-ms - Timeout waiting for next item (default 10000 for walk-fn)
+     - :live-overflow, :max-resyncs, :max-queued-publishes, :max-queued-bytes -
+       kabel's live flow control for this topic. Writes are relayed through a
+       bounded queue per subscriber, paced by the subscriber's acks. A queue that
+       overflows (default `:resync`) makes the subscriber resubscribe; its
+       handshake then resends every mutable key, since timestamps cannot tell
+       which updates it lost. `:on-complete`/`:on-handshake-complete` fire again
+       after such a resync. A delete dropped with the backlog is not recovered,
+       as on any reconnect.
 
    Returns the topic."
   [peer topic store opts]
@@ -564,9 +590,14 @@
 
     ;; Register topic with pubsub
     (pubsub/register-topic! peer topic
-                            {:strategy strategy
-                             :batch-size (:batch-size opts 20)
-                             :item-timeout-ms item-timeout-ms})
+                            (merge {:strategy strategy
+                                    :batch-size (:batch-size opts 20)
+                                    :item-timeout-ms item-timeout-ms}
+                                   ;; kabel's live flow control
+                                   (select-keys opts [:live-overflow
+                                                      :max-resyncs
+                                                      :max-queued-publishes
+                                                      :max-queued-bytes])))
 
     ;; Set up write hook for auto-publishing
     ;; Pass key-sort-fn to ensure multi-assoc keys are published in correct order
